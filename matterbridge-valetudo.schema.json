@@ -1,0 +1,279 @@
+{
+  "title": "Matterbridge Valetudo Plugin Configuration",
+  "description": "Multi-vacuum support for Valetudo-enabled robot vacuums with automatic mDNS discovery",
+  "type": "object",
+  "required": ["name", "type"],
+  "properties": {
+    "name": {
+      "title": "Plugin Name",
+      "description": "Plugin identifier (read-only)",
+      "type": "string",
+      "readOnly": true
+    },
+    "type": {
+      "title": "Plugin Type",
+      "description": "Platform type (read-only)",
+      "type": "string",
+      "readOnly": true
+    },
+    "discovery": {
+      "title": "Auto-Discovery",
+      "description": "Automatic mDNS discovery of Valetudo vacuums on your network",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "title": "Enable Auto-Discovery",
+          "description": "Automatically find and add Valetudo vacuums on your network",
+          "type": "boolean",
+          "default": true
+        },
+        "timeout": {
+          "title": "Discovery Timeout (ms)",
+          "description": "How long to wait for mDNS responses (1000-30000ms)",
+          "type": "number",
+          "default": 5000,
+          "minimum": 1000,
+          "maximum": 30000
+        },
+        "scanIntervalSeconds": {
+          "title": "Periodic Scan Interval (seconds)",
+          "description": "Re-scan interval: 0 = scan once at startup, >0 = periodic scanning (useful for detecting new vacuums or IP changes)",
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "maximum": 86400
+        }
+      }
+    },
+    "vacuums": {
+      "title": "Manual Vacuum Configuration",
+      "description": "Manually add vacuums by IP address (works alongside auto-discovery)",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ip"],
+        "properties": {
+          "ip": {
+            "title": "IP Address",
+            "description": "Static IP address or hostname of the Valetudo vacuum",
+            "type": "string",
+            "pattern": "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$|^[a-zA-Z0-9][a-zA-Z0-9-_.]*[a-zA-Z0-9]$"
+          },
+          "name": {
+            "title": "Custom Name",
+            "description": "Optional friendly name (defaults to manufacturer + model from vacuum)",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "description": "Enable or disable this vacuum",
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "default": []
+    },
+    "pollingInterval": {
+      "title": "Polling Interval (ms)",
+      "description": "How often to check vacuum status (5000-60000ms, applies to all vacuums)",
+      "type": "number",
+      "default": 30000,
+      "minimum": 5000,
+      "maximum": 60000
+    },
+    "enableServerMode": {
+      "title": "Apple Home Server Mode",
+      "description": "Enable server mode (required for Apple Home support, creates separate QR code for each vacuum)",
+      "type": "boolean",
+      "default": false
+    },
+    "positionTracking": {
+      "title": "Position Tracking",
+      "description": "Track which room/area the vacuum is currently cleaning",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "title": "Enable Position Tracking",
+          "description": "Show current room/area during cleaning",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "consumables": {
+      "title": "Consumables Tracking",
+      "description": "Monitor brush, filter, and sensor lifetime (applies to all vacuums)",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "title": "Enable Consumable Tracking",
+          "description": "Track and log consumable status",
+          "type": "boolean",
+          "default": true
+        },
+        "warningThreshold": {
+          "title": "Warning Threshold (%)",
+          "description": "Trigger warning when lifetime falls below this percentage (0-100)",
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 100
+        },
+        "exposeAsContactSensors": {
+          "title": "Expose as Contact Sensors",
+          "description": "Create contact sensors for each consumable (open = needs replacement, closed = OK)",
+          "type": "boolean",
+          "default": false
+        },
+        "maxLifetimes": {
+          "title": "Maximum Lifetimes (minutes)",
+          "description": "Expected lifetime for each consumable type",
+          "type": "object",
+          "properties": {
+            "mainBrush": {
+              "title": "Main Brush",
+              "description": "Default: 18,000 minutes (300 hours)",
+              "type": "number",
+              "default": 18000,
+              "minimum": 60
+            },
+            "sideBrush": {
+              "title": "Side Brush",
+              "description": "Default: 12,000 minutes (200 hours)",
+              "type": "number",
+              "default": 12000,
+              "minimum": 60
+            },
+            "dustFilter": {
+              "title": "Dust Filter",
+              "description": "Default: 9,000 minutes (150 hours)",
+              "type": "number",
+              "default": 9000,
+              "minimum": 60
+            },
+            "sensor": {
+              "title": "Sensor Cleaning",
+              "description": "Default: 1,800 minutes (30 hours)",
+              "type": "number",
+              "default": 1800,
+              "minimum": 60
+            }
+          }
+        }
+      }
+    },
+    "intensityPresets": {
+      "title": "Intensity Presets (Advanced)",
+      "description": "Override default fan speed and water usage for each intensity level",
+      "type": "object",
+      "properties": {
+        "auto": {
+          "title": "Auto Intensity",
+          "type": "object",
+          "properties": {
+            "fanSpeed": {
+              "title": "Fan Speed",
+              "description": "e.g., 'low', 'medium', 'high', 'max'",
+              "type": "string",
+              "default": "medium"
+            },
+            "waterUsage": {
+              "title": "Water Usage",
+              "description": "For mop modes: 'min', 'low', 'medium', 'high', 'max'",
+              "type": "string",
+              "default": "medium"
+            }
+          }
+        },
+        "quiet": {
+          "title": "Quiet Intensity",
+          "type": "object",
+          "properties": {
+            "fanSpeed": {
+              "title": "Fan Speed",
+              "type": "string",
+              "default": "low"
+            },
+            "waterUsage": {
+              "title": "Water Usage",
+              "type": "string",
+              "default": "low"
+            }
+          }
+        },
+        "quick": {
+          "title": "Quick Intensity",
+          "type": "object",
+          "properties": {
+            "fanSpeed": {
+              "title": "Fan Speed",
+              "type": "string",
+              "default": "high"
+            },
+            "waterUsage": {
+              "title": "Water Usage",
+              "type": "string",
+              "default": "high"
+            }
+          }
+        },
+        "max": {
+          "title": "Max Intensity",
+          "type": "object",
+          "properties": {
+            "fanSpeed": {
+              "title": "Fan Speed",
+              "type": "string",
+              "default": "max"
+            },
+            "waterUsage": {
+              "title": "Water Usage",
+              "type": "string",
+              "default": "high"
+            }
+          }
+        }
+      }
+    },
+    "mapCache": {
+      "title": "Map Cache (Advanced)",
+      "description": "Cache configuration for efficient position tracking",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "title": "Enable Map Caching",
+          "description": "Reduce processing overhead during position tracking",
+          "type": "boolean",
+          "default": true
+        },
+        "refreshIntervalHours": {
+          "title": "Refresh Interval (hours)",
+          "description": "Hours between automatic cache refreshes (0.1-24)",
+          "type": "number",
+          "default": 1,
+          "minimum": 0.1,
+          "maximum": 24
+        },
+        "refreshOnError": {
+          "title": "Refresh on Error",
+          "description": "Auto-refresh cache when position tracking errors occur",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "debug": {
+      "title": "Debug Mode (Development)",
+      "description": "Enable verbose debug logging",
+      "type": "boolean",
+      "default": false
+    },
+    "unregisterOnShutdown": {
+      "title": "Unregister on Shutdown (Development)",
+      "description": "Remove all devices when plugin stops (development only)",
+      "type": "boolean",
+      "default": false
+    }
+  }
+}
