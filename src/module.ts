@@ -280,8 +280,8 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     // Check for duplicate systemId
-    if (this.vacuums.has(info.systemId)) {
-      const existing = this.vacuums.get(info.systemId)!;
+    const existing = this.vacuums.get(info.systemId);
+    if (existing) {
       if (existing.ip !== ip) {
         this.log.warn(`Vacuum ${info.systemId} already exists at ${existing.ip}, now found at ${ip}. Updating IP address.`);
         existing.ip = ip;
