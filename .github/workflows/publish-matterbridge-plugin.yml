@@ -7,7 +7,10 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-
+    permissions:
+      id-token: write
+      contents: read
+        
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -58,6 +61,4 @@ jobs:
         run: npm run test
 
       - name: Publish the plugin to npm
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
