@@ -10,7 +10,6 @@ import pluginN from 'eslint-plugin-n';
 import pluginPromise from 'eslint-plugin-promise';
 import pluginJsdoc from 'eslint-plugin-jsdoc';
 import pluginPrettierRecommended from 'eslint-plugin-prettier/recommended';
-import pluginJest from 'eslint-plugin-jest';
 import pluginVitest from '@vitest/eslint-plugin';
 
 export default defineConfig([
@@ -53,6 +52,11 @@ export default defineConfig([
       'jsdoc/tag-lines': ['error', 'any', { startLines: 1, endLines: 0 }], // Require a blank line before JSDoc comments
       'jsdoc/check-tag-names': ['warn', { definedTags: ['created', 'contributor', 'remarks'] }], // Allow custom tags
       'jsdoc/no-undefined-types': 'off',
+      'jsdoc/require-param': 'off', // Don't require @param for all parameters
+      'jsdoc/require-param-type': 'off', // TypeScript provides types
+      'jsdoc/require-param-description': 'off', // Don't require descriptions
+      'jsdoc/require-returns': 'off', // Don't require @returns
+      'jsdoc/require-returns-type': 'off', // TypeScript provides return types
       'prettier/prettier': 'warn', // Use Prettier for formatting
     },
   },
@@ -90,39 +94,12 @@ export default defineConfig([
     },
   },
   {
-    name: 'Jest Test Files',
-    files: ['**/*.spec.ts', '**/*.test.ts', 'test/**/*.ts'],
-    ignores: ['vitest'], // Ignore Vitest test files
-    languageOptions: {
-      parser: tseslint.parser,
-      parserOptions: {
-        project: './tsconfig.jest.json', // Use a separate tsconfig for Jest tests with "isolatedModules": true
-        sourceType: 'module',
-        ecmaVersion: 'latest',
-      },
-    },
-    plugins: {
-      jest: pluginJest, // Add Jest plugin for test files
-    },
-    rules: {
-      // Override/add rules specific to test files here
-      'no-unused-vars': 'off', // Disable base rule for unused variables in test files
-      '@typescript-eslint/no-unused-vars': 'off', // Disable TypeScript rule for unused variables in test files
-      '@typescript-eslint/no-explicit-any': 'off', // Allow 'any' type in test files
-      '@typescript-eslint/no-empty-function': 'off', // Allow empty functions in test files
-      'jsdoc/require-jsdoc': 'off', // Disable JSDoc rule in test files
-
-      // Recommended Jest rules
-      ...pluginJest.configs.recommended.rules,
-    },
-  },
-  {
     name: 'Vitest Test Files',
     files: ['vitest/*.spec.ts', 'vitest/*.test.ts'],
     languageOptions: {
       parser: tseslint.parser,
       parserOptions: {
-        project: './tsconfig.jest.json', // Or your shared tsconfig
+        project: './tsconfig.vitest.json',
         sourceType: 'module',
         ecmaVersion: 'latest',
       },
