@@ -55,7 +55,7 @@ jobs:
         run: npm run lint
 
       - name: Test the plugin
-        run: npm run test -- --forceExit
+        run: npm run test
 
       - name: Publish the plugin to npm
         run: npm publish
