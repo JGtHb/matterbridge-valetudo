@@ -49,7 +49,7 @@ jobs:
           npm run buildProduction
           npm run lint
           npm install -g .
-          npm run test -- --forceExit
+          npm run test
           npm pkg delete devDependencies scripts types
           npx shx rm -rf ./node_modules
           npm install --omit=dev
