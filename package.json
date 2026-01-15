@@ -1,6 +1,6 @@
 {
   "name": "matterbridge-valetudo",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Matterbridge plugin for Valetudo-enabled robot vacuums",
   "author": "JGtHb",
   "license": "Apache-2.0",

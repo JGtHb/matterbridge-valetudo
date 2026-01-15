@@ -476,22 +476,57 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         const operationModes = await vacuum.client.getOperationModePresets();
         if (operationModes && operationModes.length > 0) {
           vacuum.operationModes = operationModes;
+          const modeMapping = this.getModeMapping();
 
-          if (operationModes.includes('vacuum') || operationModes.includes('vaccum')) {
-            supportedCleanModes.push(...this.createIntensityVariants('vacuum', RvcCleanModeValue.VacuumQuiet, [RvcCleanMode.ModeTag.Vacuum], fanSpeedPresets));
+          // Vacuum category (Matter modes 66-70)
+          const vacuumSource = modeMapping.vacuum;
+          if (operationModes.includes(vacuumSource) || (vacuumSource === 'vacuum' && operationModes.includes('vaccum'))) {
+            supportedCleanModes.push(...this.createIntensityVariants(vacuumSource, RvcCleanModeValue.VacuumQuiet, [RvcCleanMode.ModeTag.Vacuum], fanSpeedPresets));
+            if (vacuumSource !== 'vacuum') {
+              this.log.info(`[${vacuum.name}] Vacuum category: using '${vacuumSource}'`);
+            }
+          } else if (vacuumSource !== 'vacuum') {
+            this.log.warn(`[${vacuum.name}] Vacuum category: configured mode '${vacuumSource}' not supported by robot`);
           }
 
-          if (operationModes.includes('mop')) {
+          // Mop category (Matter modes 31-34)
+          const mopSource = modeMapping.mop;
+          if (operationModes.includes(mopSource)) {
             supportedCleanModes.push(...this.createMopVariants(fanSpeedPresets, waterUsagePresets));
+            if (mopSource !== 'mop') {
+              this.log.info(`[${vacuum.name}] Mop category: using '${mopSource}'`);
+            }
+          } else if (mopSource !== 'mop') {
+            this.log.warn(`[${vacuum.name}] Mop category: configured mode '${mopSource}' not supported by robot`);
           }
 
-          if (operationModes.includes('vacuum_and_mop')) {
+          // Vacuum & Mop category (Matter modes 5-9)
+          const vacuumMopSource = modeMapping.vacuumAndMop;
+          if (operationModes.includes(vacuumMopSource)) {
             supportedCleanModes.push(
-              ...this.createIntensityVariants('vacuum_and_mop', RvcCleanModeValue.VacuumMopQuiet, [RvcCleanMode.ModeTag.Mop, RvcCleanMode.ModeTag.Vacuum], fanSpeedPresets),
+              ...this.createIntensityVariants(vacuumMopSource, RvcCleanModeValue.VacuumMopQuiet, [RvcCleanMode.ModeTag.Mop, RvcCleanMode.ModeTag.Vacuum], fanSpeedPresets),
             );
+            if (vacuumMopSource !== 'vacuum_and_mop') {
+              this.log.info(`[${vacuum.name}] Vacuum & Mop category: using '${vacuumMopSource}'`);
+            }
+          } else if (vacuumMopSource !== 'vacuum_and_mop') {
+            this.log.warn(`[${vacuum.name}] Vacuum & Mop category: configured mode '${vacuumMopSource}' not supported by robot`);
           }
         }
       }
+
+      // Deduplicate modes by label (Matter requires unique labels)
+      const seenLabels = new Set<string>();
+      const deduplicatedModes = supportedCleanModes.filter((mode) => {
+        if (seenLabels.has(mode.label)) {
+          this.log.debug(`[${vacuum.name}] Skipping duplicate mode label: ${mode.label}`);
+          return false;
+        }
+        seenLabels.add(mode.label);
+        return true;
+      });
+      supportedCleanModes.length = 0;
+      supportedCleanModes.push(...deduplicatedModes);
 
       if (supportedCleanModes.length === 0) {
         supportedCleanModes.push({
@@ -713,10 +748,23 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
    * Get base mode from mode number
    */
   private getBaseModeFromNumber(mode: number): string {
-    if (mode >= 66 && mode <= 70) return 'vacuum';
-    if (mode >= 31 && mode <= 42) return 'mop';
-    if (mode >= 5 && mode <= 9) return 'vacuum_and_mop';
+    const modeMapping = this.getModeMapping();
+    if (mode >= 66 && mode <= 70) return modeMapping.vacuum;
+    if (mode >= 31 && mode <= 42) return modeMapping.mop;
+    if (mode >= 5 && mode <= 9) return modeMapping.vacuumAndMop;
     return '';
+  }
+
+  /**
+   * Get the configured mode mapping with defaults
+   */
+  private getModeMapping(): { vacuum: string; mop: string; vacuumAndMop: string } {
+    const config = this.config as { modeMapping?: { vacuum?: string; mop?: string; vacuumAndMop?: string } };
+    return {
+      vacuum: config.modeMapping?.vacuum || 'vacuum',
+      mop: config.modeMapping?.mop || 'mop',
+      vacuumAndMop: config.modeMapping?.vacuumAndMop || 'vacuum_and_mop',
+    };
   }
 
   /**
@@ -939,45 +987,50 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
       // Position tracking with cached map layers
       const config = this.config as { positionTracking?: { enabled?: boolean } };
-      if (config.positionTracking?.enabled !== false && vacuum.mapLayersCache && vacuum.areaToSegmentMap.size > 0) {
+      if (config.positionTracking?.enabled !== false && vacuum.areaToSegmentMap.size > 0) {
         try {
-          // Check cache expiration
-          if (Date.now() > vacuum.mapCacheValidUntil) {
+          // Initialize or refresh cache if needed
+          if (!vacuum.mapLayersCache || Date.now() > vacuum.mapCacheValidUntil) {
             await this.refreshMapCacheForVacuum(vacuum);
           }
 
-          const positionData = await vacuum.client.getMapPositionData();
-          if (positionData) {
-            // Check map version
-            if (positionData.metaData?.version !== undefined && positionData.metaData.version !== vacuum.mapLayersCache.version) {
-              this.log.warn(`[${vacuum.name}] Map version changed, refreshing cache...`);
-              await this.refreshMapCacheForVacuum(vacuum);
-            }
+          // Skip position tracking if cache still not available
+          if (!vacuum.mapLayersCache) {
+            this.log.debug(`[${vacuum.name}] Map cache not available, skipping position tracking`);
+          } else {
+            const positionData = await vacuum.client.getMapPositionData();
+            if (positionData) {
+              // Check map version
+              if (positionData.metaData?.version !== undefined && positionData.metaData.version !== vacuum.mapLayersCache.version) {
+                this.log.warn(`[${vacuum.name}] Map version changed, refreshing cache...`);
+                await this.refreshMapCacheForVacuum(vacuum);
+              }
 
-            // Extract robot position
-            const robotEntity = positionData.entities.find((entity) => entity.type === 'robot_position');
-            if (robotEntity && robotEntity.points.length >= 2) {
-              const robotPos = {
-                x: Math.round(robotEntity.points[0] / vacuum.mapLayersCache.pixelSize),
-                y: Math.round(robotEntity.points[1] / vacuum.mapLayersCache.pixelSize),
-              };
+              // Extract robot position
+              const robotEntity = positionData.entities.find((entity) => entity.type === 'robot_position');
+              if (robotEntity && robotEntity.points.length >= 2 && vacuum.mapLayersCache) {
+                const robotPos = {
+                  x: Math.round(robotEntity.points[0] / vacuum.mapLayersCache.pixelSize),
+                  y: Math.round(robotEntity.points[1] / vacuum.mapLayersCache.pixelSize),
+                };
 
-              const currentSegment = vacuum.client.findSegmentAtPositionCached(vacuum.mapLayersCache, robotPos.x, robotPos.y);
+                const currentSegment = vacuum.client.findSegmentAtPositionCached(vacuum.mapLayersCache, robotPos.x, robotPos.y);
 
-              if (currentSegment) {
-                let foundAreaId: number | null = null;
-                for (const [areaId, segmentInfo] of vacuum.areaToSegmentMap.entries()) {
-                  if (segmentInfo.id === currentSegment.metaData.segmentId) {
-                    foundAreaId = areaId;
-                    break;
+                if (currentSegment) {
+                  let foundAreaId: number | null = null;
+                  for (const [areaId, segmentInfo] of vacuum.areaToSegmentMap.entries()) {
+                    if (segmentInfo.id === currentSegment.metaData.segmentId) {
+                      foundAreaId = areaId;
+                      break;
+                    }
                   }
-                }
 
-                if (foundAreaId !== null && vacuum.lastCurrentArea !== foundAreaId) {
-                  const segmentInfo = vacuum.areaToSegmentMap.get(foundAreaId);
-                  this.log.info(`[${vacuum.name}] Location: ${segmentInfo?.name || 'Unknown'} (area ${foundAreaId})`);
-                  await vacuum.device.setAttribute('ServiceArea', 'currentArea', foundAreaId, this.log);
-                  vacuum.lastCurrentArea = foundAreaId;
+                  if (foundAreaId !== null && vacuum.lastCurrentArea !== foundAreaId) {
+                    const segmentInfo = vacuum.areaToSegmentMap.get(foundAreaId);
+                    this.log.info(`[${vacuum.name}] Location: ${segmentInfo?.name || 'Unknown'} (area ${foundAreaId})`);
+                    await vacuum.device.setAttribute('ServiceArea', 'currentArea', foundAreaId, this.log);
+                    vacuum.lastCurrentArea = foundAreaId;
+                  }
                 }
               }
             }
@@ -1189,6 +1242,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     }
 
     const modes: Array<{ label: string; mode: number; modeTags: Array<{ value: number }> }> = [];
+    const usedLabels = new Set<string>();
 
     const mopConfigs: Array<{ fanPreset: string; waterPreset: string; tag: number; label: string; mode: number }> = [
       { fanPreset: 'medium', waterPreset: 'medium', tag: RvcCleanMode.ModeTag.Auto, label: 'Mop (Auto)', mode: RvcCleanModeValue.MopMin },
@@ -1201,7 +1255,8 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       const hasFan = fanSpeedPresets.includes(config.fanPreset);
       const hasWater = waterUsagePresets.includes(config.waterPreset);
 
-      if (hasFan && hasWater) {
+      if (hasFan && hasWater && !usedLabels.has(config.label)) {
+        usedLabels.add(config.label);
         modes.push({
           label: config.label,
           mode: config.mode,

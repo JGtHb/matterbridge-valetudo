@@ -263,6 +263,34 @@
         }
       }
     },
+    "modeMapping": {
+      "title": "Operation Mode Mapping",
+      "description": "Map Valetudo operation modes to Matter clean mode categories. Useful for robots that support vacuum_then_mop mode.",
+      "type": "object",
+      "properties": {
+        "vacuum": {
+          "title": "Vacuum Category Source",
+          "description": "Valetudo mode for Matter Vacuum modes (default: vacuum)",
+          "type": "string",
+          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
+          "default": "vacuum"
+        },
+        "mop": {
+          "title": "Mop Category Source",
+          "description": "Valetudo mode for Matter Mop modes (default: mop)",
+          "type": "string",
+          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
+          "default": "mop"
+        },
+        "vacuumAndMop": {
+          "title": "Vacuum & Mop Category Source",
+          "description": "Valetudo mode for Matter Vacuum & Mop modes (default: vacuum_and_mop)",
+          "type": "string",
+          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
+          "default": "vacuum_and_mop"
+        }
+      }
+    },
     "debug": {
       "title": "Debug Mode (Development)",
       "description": "Enable verbose debug logging",
