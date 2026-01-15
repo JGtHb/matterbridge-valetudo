@@ -181,10 +181,31 @@ export interface MapPositionData {
 export class ValetudoClient {
   private baseUrl: string;
   private log: AnsiLogger;
+  private authUsername: string | undefined = undefined;
+  private authPassword: string | undefined = undefined;
 
-  constructor(ip: string, log: AnsiLogger) {
+  constructor(ip: string, log: AnsiLogger, username?: string, password?: string) {
     this.baseUrl = `http://${ip}`;
     this.log = log;
+    this.authUsername = username;
+    this.authPassword = password;
+  }
+
+  /**
+   * Get the Authorization header for HTTP basic auth
+   * @returns Headers object with Authorization header if credentials are set, or empty headers
+   */
+  private getAuthHeaders(): Record<string, string> {
+    if (this.authUsername && this.authPassword) {
+      const credentials = Buffer.from(`${this.authUsername}:${this.authPassword}`).toString('base64');
+      return {
+        'Authorization': `Basic ${credentials}`,
+        'accept': 'application/json',
+      };
+    }
+    return {
+      'accept': 'application/json',
+    };
   }
 
   // ==========================================================================
@@ -622,7 +643,7 @@ export class ValetudoClient {
       let timeoutId: NodeJS.Timeout | null = null;
 
       const req = http
-        .get(url, { headers: { accept: 'application/json' } }, (res) => {
+        .get(url, { headers: this.getAuthHeaders() }, (res) => {
           let data = '';
 
           if (res.statusCode !== 200) {
@@ -688,6 +709,7 @@ export class ValetudoClient {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(bodyString),
           'Accept': 'application/json',
+          ...this.getAuthHeaders(),
         },
       };
 

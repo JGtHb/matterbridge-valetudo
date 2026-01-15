@@ -184,7 +184,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
    */
   private async loadManualVacuums(): Promise<void> {
     const config = this.config as {
-      vacuums?: Array<{ ip: string; name?: string; enabled?: boolean }>;
+      vacuums?: Array<{ ip: string; name?: string; enabled?: boolean; username?: string; password?: string }>;
     };
 
     const manualVacuums = config.vacuums || [];
@@ -197,7 +197,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       }
 
       try {
-        await this.addVacuum(vacuumConfig.ip, vacuumConfig.name, 'manual');
+        await this.addVacuum(vacuumConfig.ip, vacuumConfig.name, 'manual', vacuumConfig.username, vacuumConfig.password);
       } catch (error) {
         this.log.error(`Failed to add manual vacuum at ${vacuumConfig.ip}: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -255,11 +255,11 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   /**
    * Add a new vacuum to the system
    */
-  private async addVacuum(ip: string, customName: string | undefined, source: 'mdns' | 'manual'): Promise<void> {
+  private async addVacuum(ip: string, customName: string | undefined, source: 'mdns' | 'manual', username?: string, password?: string): Promise<void> {
     this.log.info(`Adding vacuum from ${source}: ${ip}${customName ? ` (${customName})` : ''}`);
 
     // Create Valetudo client
-    const client = new ValetudoClient(ip, this.log);
+    const client = new ValetudoClient(ip, this.log, username, password);
 
     // Test connection
     const isConnected = await client.testConnection();

@@ -69,6 +69,16 @@
             "description": "Enable or disable this vacuum",
             "type": "boolean",
             "default": true
+          },
+          "username": {
+            "title": "HTTP Basic Auth Username",
+            "description": "Optional username for HTTP basic authentication with Valetudo",
+            "type": "string"
+          },
+          "password": {
+            "title": "HTTP Basic Auth Password",
+            "description": "Optional password for HTTP basic authentication with Valetudo",
+            "type": "string"
           }
         }
       },
