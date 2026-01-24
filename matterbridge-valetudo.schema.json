@@ -69,6 +69,16 @@
             "description": "Enable or disable this vacuum",
             "type": "boolean",
             "default": true
+          },
+          "username": {
+            "title": "Username",
+            "description": "HTTP Basic Auth username (if password protection is enabled on the vacuum)",
+            "type": "string"
+          },
+          "password": {
+            "title": "Password",
+            "description": "HTTP Basic Auth password (if password protection is enabled on the vacuum)",
+            "type": "string"
           }
         }
       },
