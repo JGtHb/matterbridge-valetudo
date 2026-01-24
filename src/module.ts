@@ -184,7 +184,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
    */
   private async loadManualVacuums(): Promise<void> {
     const config = this.config as {
-      vacuums?: Array<{ ip: string; name?: string; enabled?: boolean }>;
+      vacuums?: Array<{ ip: string; name?: string; enabled?: boolean; username?: string; password?: string }>;
     };
 
     const manualVacuums = config.vacuums || [];
@@ -197,7 +197,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       }
 
       try {
-        await this.addVacuum(vacuumConfig.ip, vacuumConfig.name, 'manual');
+        await this.addVacuum(vacuumConfig.ip, vacuumConfig.name, 'manual', vacuumConfig.username, vacuumConfig.password);
       } catch (error) {
         this.log.error(`Failed to add manual vacuum at ${vacuumConfig.ip}: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -255,11 +255,11 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   /**
    * Add a new vacuum to the system
    */
-  private async addVacuum(ip: string, customName: string | undefined, source: 'mdns' | 'manual'): Promise<void> {
+  private async addVacuum(ip: string, customName: string | undefined, source: 'mdns' | 'manual', username?: string, password?: string): Promise<void> {
     this.log.info(`Adding vacuum from ${source}: ${ip}${customName ? ` (${customName})` : ''}`);
 
     // Create Valetudo client
-    const client = new ValetudoClient(ip, this.log);
+    const client = new ValetudoClient(ip, this.log, username, password);
 
     // Test connection
     const isConnected = await client.testConnection();
@@ -408,11 +408,13 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         const segments = await vacuum.client.getMapSegments();
         if (segments && segments.length > 0) {
           const usedNames = new Map<string, number>();
-          const validSegments = segments.filter((segment) => segment.name && segment.name.trim().length > 0);
 
-          supportedAreas = validSegments.map((segment, index) => {
-            let locationName = segment.name.trim() || `Room ${index + 1}`;
+          // Don't filter - accept all segments, even unnamed ones
+          supportedAreas = segments.map((segment, index) => {
+            // Use segment name if available, otherwise use segment ID
+            let locationName = (segment.name && segment.name.trim()) || `Segment ${segment.id}`;
 
+            // Handle duplicates
             if (usedNames.has(locationName)) {
               const count = (usedNames.get(locationName) ?? 0) + 1;
               usedNames.set(locationName, count);
@@ -441,7 +443,11 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
           if (supportedAreas && supportedAreas.length > 0) {
             this.log.info(`  Found ${supportedAreas.length} areas: ${supportedAreas.map((a) => a.areaInfo.locationInfo?.locationName || 'Unknown').join(', ')}`);
           }
+        } else {
+          this.log.info(`  No map segments found for ${vacuum.name}`);
         }
+      } else {
+        this.log.info(`  MapSegmentationCapability not supported for ${vacuum.name}`);
       }
 
       // Build run modes
@@ -551,7 +557,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         null,
         undefined,
         undefined,
-        supportedAreas,
+        undefined,
         [],
         undefined,
         undefined,
@@ -580,11 +586,25 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         );
       }
 
+      // After registration, add areas and set currentArea
       await this.registerDevice(vacuum.device);
 
       this.log.info(`  Matter device created and registered successfully`);
 
-      // Set initial state AFTER registering (endpoint must be active to set attributes)
+      if (supportedAreas && supportedAreas.length > 0) {
+        this.log.info(`  Setting ${supportedAreas.length} supported areas...`);
+        this.log.info(`  Area names: ${supportedAreas.map((a) => a.areaInfo.locationInfo?.locationName).join(', ')}`);
+
+        await vacuum.device.setAttribute('ServiceArea', 'supportedAreas', supportedAreas, this.log);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await vacuum.device.setAttribute('ServiceArea', 'currentArea', supportedAreas[0].areaId, this.log);
+        vacuum.lastCurrentArea = supportedAreas[0].areaId;
+        this.log.info(`  Initial currentArea set to: ${supportedAreas[0].areaId}`);
+      } else {
+        this.log.warn(`  No supportedAreas to set! supportedAreas is ${supportedAreas ? 'empty array' : 'undefined'}`);
+      }
+
+      // Set initial state AFTER registering and setting areas
       await this.setInitialVacuumState(vacuum);
 
       // Set up consumables for this vacuum
