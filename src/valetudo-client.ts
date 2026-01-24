@@ -181,10 +181,16 @@ export interface MapPositionData {
 export class ValetudoClient {
   private baseUrl: string;
   private log: AnsiLogger;
+  private authHeader: string | null = null;
 
-  constructor(ip: string, log: AnsiLogger) {
+  constructor(ip: string, log: AnsiLogger, username?: string, password?: string) {
     this.baseUrl = `http://${ip}`;
     this.log = log;
+
+    // Pre-compute Base64 Authorization header if credentials are provided
+    if (username && password) {
+      this.authHeader = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
+    }
   }
 
   // ==========================================================================
@@ -621,8 +627,13 @@ export class ValetudoClient {
       const timeout = timeoutMs ?? 10000; // Default 10 second timeout, allow override
       let timeoutId: NodeJS.Timeout | null = null;
 
+      const headers: Record<string, string> = { accept: 'application/json' };
+      if (this.authHeader) {
+        headers['Authorization'] = this.authHeader;
+      }
+
       const req = http
-        .get(url, { headers: { accept: 'application/json' } }, (res) => {
+        .get(url, { headers }, (res) => {
           let data = '';
 
           if (res.statusCode !== 200) {
@@ -679,16 +690,21 @@ export class ValetudoClient {
       const bodyString = JSON.stringify(body);
       const urlObj = new URL(url);
 
+      const headers: Record<string, string | number> = {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(bodyString),
+        'Accept': 'application/json',
+      };
+      if (this.authHeader) {
+        headers['Authorization'] = this.authHeader;
+      }
+
       const options = {
         hostname: urlObj.hostname,
         port: urlObj.port || 80,
         path: urlObj.pathname,
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(bodyString),
-          'Accept': 'application/json',
-        },
+        headers,
       };
 
       const req = http.request(options, (res) => {
