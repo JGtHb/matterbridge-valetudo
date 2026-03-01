@@ -7,7 +7,7 @@
  */
 
 import multicastdns from 'multicast-dns';
-import { AnsiLogger } from 'node-ansi-logger';
+import { AnsiLogger } from 'matterbridge/logger';
 
 /** DNS record with name and optional data field */
 interface DnsRecord {
