@@ -1208,11 +1208,11 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     const intensityMap: Record<string, { tag: number; label: string; offset: number }> = {
       off: { tag: RvcCleanMode.ModeTag.Min, label: 'Off', offset: 4 },
       min: { tag: RvcCleanMode.ModeTag.Min, label: 'Min', offset: 4 },
-      low: { tag: RvcCleanMode.ModeTag.Quiet, label: 'Quiet', offset: 2 },
-      medium: { tag: RvcCleanMode.ModeTag.Auto, label: 'Auto', offset: 0 },
-      high: { tag: RvcCleanMode.ModeTag.Quick, label: 'Quick', offset: 1 },
+      low: { tag: RvcCleanMode.ModeTag.Quiet, label: 'Quiet', offset: 0 },
+      medium: { tag: RvcCleanMode.ModeTag.Auto, label: 'Auto', offset: 1 },
+      high: { tag: RvcCleanMode.ModeTag.Quick, label: 'Quick', offset: 2 },
       max: { tag: RvcCleanMode.ModeTag.Max, label: 'Max', offset: 3 },
-      turbo: { tag: RvcCleanMode.ModeTag.Max, label: 'Turbo', offset: 3 },
+      turbo: { tag: RvcCleanMode.ModeTag.Max, label: 'Turbo', offset: 4 },
     };
 
     const modeLabel = baseMode === 'vacuum_and_mop' ? 'Vacuum & Mop' : baseMode.charAt(0).toUpperCase() + baseMode.slice(1);
