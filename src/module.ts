@@ -7,10 +7,14 @@
  * @license Apache-2.0
  */
 
-import { MatterbridgeDynamicPlatform, PlatformConfig, PlatformMatterbridge, MatterbridgeEndpoint, contactSensor } from 'matterbridge';
+import { MatterbridgeDynamicPlatform, PlatformConfig, MatterbridgeEndpoint, contactSensor } from 'matterbridge';
 import { RoboticVacuumCleaner } from 'matterbridge/devices';
 import { AnsiLogger, LogLevel } from 'matterbridge/logger';
 import { RvcCleanMode, RvcRunMode } from 'matterbridge/matter/clusters';
+
+// Derive PlatformMatterbridge type from the parent class constructor to avoid
+// import resolution issues across different npm dependency tree layouts.
+type PlatformMatterbridge = ConstructorParameters<typeof MatterbridgeDynamicPlatform>[0];
 
 import { ValetudoClient, BatteryStateAttribute, ValetudoConsumable, CachedMapLayers } from './valetudo-client.js';
 import { ValetudoDiscovery } from './valetudo-discovery.js';
@@ -672,7 +676,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     });
 
     // Change mode command (handles both run mode and clean mode)
-    vacuum.device.addCommandHandler('changeToMode', async (data) => {
+    vacuum.device.addCommandHandler('changeToMode', async (data: { request: Record<string, unknown> }) => {
       this.log.info(`[${vacuum.name}] changeToMode called: ${JSON.stringify(data)}`);
 
       const request = data.request as { newMode: number };
@@ -735,7 +739,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     });
 
     // Select areas command
-    vacuum.device.addCommandHandler('selectAreas', async (data) => {
+    vacuum.device.addCommandHandler('selectAreas', async (data: { request: Record<string, unknown> }) => {
       this.log.info(`[${vacuum.name}] selectAreas called: ${JSON.stringify(data)}`);
 
       const request = data.request as { newAreas?: number[] };
