@@ -477,6 +477,37 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         vacuumAndMop: operatingModes?.includes(modeMapping.vacuumAndMop) ? modeMapping.vacuumAndMop : undefined,
       };
 
+      type OperationModeContext = 'vacuum' | 'mop' | 'vacuum_and_mop';
+
+      const config = this.config as {
+        customTags?: Array<{
+          operationMode: Array<OperationModeContext>;
+          fanSpeed: string;
+          waterUsage: string;
+          matterModeTag: number;
+        }>;
+      };
+
+      const customTagMap: Record<OperationModeContext, Record<string, number>> = {
+        vacuum: {},
+        mop: {},
+        vacuum_and_mop: {},
+      };
+      if (config.customTags && config.customTags.length > 0) {
+        for (const customTag of config.customTags) {
+          const modeTag = customTag.matterModeTag;
+          const contexts: Array<OperationModeContext> = customTag.operationMode;
+          for (const ctx of contexts) {
+            if (customTag.fanSpeed) {
+              customTagMap[ctx][customTag.fanSpeed] = modeTag;
+            }
+            if (customTag.waterUsage) {
+              customTagMap[ctx][customTag.waterUsage] = modeTag;
+            }
+          }
+        }
+      }
+
       const presetToTagMap: Record<string, number> = {
         off: RvcCleanMode.ModeTag.Min,
         min: RvcCleanMode.ModeTag.Min,
@@ -486,10 +517,12 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         max: RvcCleanMode.ModeTag.Max,
         turbo: RvcCleanMode.ModeTag.Max,
       };
+
       if (fanSpeedPresets) {
+        const customTags = customTagMap['vacuum'];
         const modeIdBase = RvcCleanModeBase + vacuum.modeMap.size;
         fanSpeedPresets.forEach((preset, index) => {
-          const tag = presetToTagMap[preset] || RvcCleanMode.ModeTag.Auto;
+          const tag = customTags[preset] ?? presetToTagMap[preset] ?? RvcCleanMode.ModeTag.Auto;
           const modeId = modeIdBase + index;
           const label = `Vacuum (${RvcCleanMode.ModeTag[tag]})`;
           supportedCleanModes.push({
@@ -506,10 +539,11 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         });
       }
       if (operatingModes?.includes(modeMapping.mop)) {
+        const customTags = customTagMap['mop'];
         const modeIdBase = RvcCleanModeBase + vacuum.modeMap.size;
         if (waterUsagePresets) {
           waterUsagePresets.forEach((preset, index) => {
-            const tag = presetToTagMap[preset] || RvcCleanMode.ModeTag.Auto;
+            const tag = customTags[preset] ?? presetToTagMap[preset] ?? RvcCleanMode.ModeTag.Auto;
             const modeId = modeIdBase + index;
             const label = `Mop (${RvcCleanMode.ModeTag[tag]})`;
             supportedCleanModes.push({
@@ -538,6 +572,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         }
       }
       if (operatingModes?.includes(modeMapping.vacuumAndMop)) {
+        const customTags = customTagMap['vacuum_and_mop'];
         const modeIdBase = RvcCleanModeBase + vacuum.modeMap.size;
         if (fanSpeedPresets && waterUsagePresets) {
           const nFanSpeeds = fanSpeedPresets.length;
@@ -545,7 +580,8 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
           for (let i = 0; i < Math.max(nFanSpeeds, nWaterLevels); i++) {
             const fanSpeed = fanSpeedPresets[i] ?? fanSpeedPresets[nFanSpeeds - 1];
             const waterUsage = waterUsagePresets[i] ?? waterUsagePresets[nWaterLevels - 1];
-            const tag = presetToTagMap[fanSpeedPresets[i] ?? waterUsagePresets[i]];
+            const preset = fanSpeedPresets[i] ?? waterUsagePresets[i];
+            const tag = customTags[preset] ?? presetToTagMap[preset];
             const modeId = modeIdBase + i;
             const label = `Vacuum & Mop (${RvcCleanMode.ModeTag[tag]})`;
             supportedCleanModes.push({

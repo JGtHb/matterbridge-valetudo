@@ -173,75 +173,53 @@
         }
       }
     },
-    "intensityPresets": {
-      "title": "Intensity Presets (Advanced)",
-      "description": "Override default fan speed and water usage for each intensity level",
-      "type": "object",
-      "properties": {
-        "auto": {
-          "title": "Auto Intensity",
-          "type": "object",
-          "properties": {
-            "fanSpeed": {
-              "title": "Fan Speed",
-              "description": "e.g., 'low', 'medium', 'high', 'max'",
+    "customTags": {
+      "title": "Custom mode tags",
+      "description": "Manually map Valetudo presets to Matter Tags",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "operationMode": {
+            "title": "Operation Mode Context",
+            "description": "Which operation mode does this apply to?",
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
               "type": "string",
-              "default": "medium"
+              "enum": ["vacuum", "mop", "vacuum_and_mop"]
             },
-            "waterUsage": {
-              "title": "Water Usage",
-              "description": "For mop modes: 'min', 'low', 'medium', 'high', 'max'",
-              "type": "string",
-              "default": "medium"
-            }
-          }
-        },
-        "quiet": {
-          "title": "Quiet Intensity",
-          "type": "object",
-          "properties": {
-            "fanSpeed": {
-              "title": "Fan Speed",
-              "type": "string",
-              "default": "low"
-            },
-            "waterUsage": {
-              "title": "Water Usage",
-              "type": "string",
-              "default": "low"
-            }
-          }
-        },
-        "quick": {
-          "title": "Quick Intensity",
-          "type": "object",
-          "properties": {
-            "fanSpeed": {
-              "title": "Fan Speed",
-              "type": "string",
-              "default": "high"
-            },
-            "waterUsage": {
-              "title": "Water Usage",
-              "type": "string",
-              "default": "high"
-            }
-          }
-        },
-        "max": {
-          "title": "Max Intensity",
-          "type": "object",
-          "properties": {
-            "fanSpeed": {
-              "title": "Fan Speed",
-              "type": "string",
-              "default": "max"
-            },
-            "waterUsage": {
-              "title": "Water Usage",
-              "type": "string",
-              "default": "high"
-            }
+            "default": ["vacuum", "mop", "vacuum_and_mop"]
+          },
+          "fanSpeed": {
+            "title": "Fan Speed",
+            "description": "e.g., 'low', 'medium', 'high', 'max'",
+            "type": "string",
+            "default": "medium"
+          },
+          "waterUsage": {
+            "title": "Water Usage",
+            "description": "For mop modes: 'min', 'low', 'medium', 'high', 'max'",
+            "type": "string",
+            "default": "medium"
+          },
+          "matterModeTag": {
+            "title": "Matter Mode",
+            "type": "number",
+            "oneOf": [
+              { "const": 0, "title": "Auto" },
+              { "const": 1, "title": "Quick" },
+              { "const": 2, "title": "Quiet" },
+              { "const": 3, "title": "LowNoise" },
+              { "const": 4, "title": "LowEnergy" },
+              { "const": 5, "title": "Vacation" },
+              { "const": 6, "title": "Min" },
+              { "const": 7, "title": "Max" },
+              { "const": 8, "title": "Night" },
+              { "const": 9, "title": "Day" },
+              { "const": 16384, "title": "DeepClean"}
+            ],
+            "default": 0
           }
         }
       }
