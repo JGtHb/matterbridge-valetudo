@@ -33,6 +33,7 @@ interface VacuumInstance {
   // Per-vacuum state
   capabilities: string[];
   operationModes: string[];
+  modeMap: Map<number, { fanSpeed?: string; waterUsage?: string; operationMode?: string }>;
   areaToSegmentMap: Map<number, { id: string; name: string }>;
   selectedSegmentIds: string[];
   selectedRoomNames: string[];
@@ -64,31 +65,7 @@ const enum RvcRunModeValue {
   Mapping = 3,
 }
 
-/**
- * RvcCleanMode values
- * Organized by cleaning type with intensity variants
- */
-const enum RvcCleanModeValue {
-  // Vacuum & Mop combined modes (5-9)
-  VacuumMopQuiet = 5,
-  VacuumMopAuto = 6,
-  VacuumMopQuick = 7,
-  VacuumMopMax = 8,
-  VacuumMopTurbo = 9,
-
-  // Mop only modes (31-34)
-  MopMin = 31,
-  MopLow = 32,
-  MopMedium = 33,
-  MopHigh = 34,
-
-  // Vacuum only modes (66-70)
-  VacuumQuiet = 66,
-  VacuumAuto = 67,
-  VacuumQuick = 68,
-  VacuumMax = 69,
-  VacuumTurbo = 70,
-}
+const RvcCleanModeBase = 5;
 
 /**
  * Matter Operational State enum values
@@ -298,18 +275,23 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       }
     }
 
-    // Fetch robot info
-    const robotInfo = await client.getRobotInfo();
-    if (!robotInfo) {
-      throw new Error(`Failed to fetch robot info from ${ip}`);
-    }
-
     // Determine device name
     let deviceName: string;
     if (customName) {
       deviceName = customName;
     } else {
-      deviceName = `${robotInfo.manufacturer} ${robotInfo.modelName}`;
+      const customizations = await client.getCustomizations();
+      if (customizations?.friendlyName) {
+        deviceName = customizations.friendlyName;
+      } else {
+        // Fetch robot info
+        // Only need to fetch info if no customName or friendlyName is set
+        const robotInfo = await client.getRobotInfo();
+        if (!robotInfo) {
+          throw new Error(`Failed to fetch robot info from ${ip}`);
+        }
+        deviceName = `${robotInfo.manufacturer} ${robotInfo.modelName}`;
+      }
     }
 
     // Create vacuum instance
@@ -323,6 +305,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       capabilities: [],
       operationModes: [],
       areaToSegmentMap: new Map(),
+      modeMap: new Map(),
       selectedSegmentIds: [],
       selectedRoomNames: [],
       consumableMap: new Map(),
@@ -473,78 +456,125 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
       let fanSpeedPresets: string[] | null = null;
       let waterUsagePresets: string[] | null = null;
+      const operatingModes = vacuum.capabilities.includes('OperationModeControlCapability') ? await vacuum.client.getOperationModePresets() : null;
 
       if (vacuum.capabilities.includes('FanSpeedControlCapability')) {
-        fanSpeedPresets = await vacuum.client.getFanSpeedPresets();
+        const presets = await vacuum.client.getFanSpeedPresets();
+        if (presets) {
+          fanSpeedPresets = presets.filter((preset) => preset !== 'off');
+        }
       }
-
       if (vacuum.capabilities.includes('WaterUsageControlCapability')) {
-        waterUsagePresets = await vacuum.client.getWaterUsagePresets();
+        const presets = await vacuum.client.getWaterUsagePresets();
+        if (presets) {
+          waterUsagePresets = presets.filter((preset) => preset !== 'off');
+        }
       }
+      const modeMapping = this.getModeMapping();
+      const operationModeMap: Record<string, string | undefined> = {
+        vacuum: operatingModes?.includes(modeMapping.vacuum) ? modeMapping.vacuum : undefined,
+        mop: operatingModes?.includes(modeMapping.mop) ? modeMapping.mop : undefined,
+        vacuumAndMop: operatingModes?.includes(modeMapping.vacuumAndMop) ? modeMapping.vacuumAndMop : undefined,
+      };
 
-      if (vacuum.capabilities.includes('OperationModeControlCapability')) {
-        const operationModes = await vacuum.client.getOperationModePresets();
-        if (operationModes && operationModes.length > 0) {
-          vacuum.operationModes = operationModes;
-          const modeMapping = this.getModeMapping();
+      const presetToTagMap: Record<string, number> = {
+        off: RvcCleanMode.ModeTag.Min,
+        min: RvcCleanMode.ModeTag.Min,
+        low: RvcCleanMode.ModeTag.Quiet,
+        medium: RvcCleanMode.ModeTag.Auto,
+        high: RvcCleanMode.ModeTag.Quick,
+        max: RvcCleanMode.ModeTag.Max,
+        turbo: RvcCleanMode.ModeTag.Max,
+      };
+      if (fanSpeedPresets) {
+        const modeIdBase = RvcCleanModeBase + vacuum.modeMap.size;
+        fanSpeedPresets.forEach((preset, index) => {
+          const tag = presetToTagMap[preset] || RvcCleanMode.ModeTag.Auto;
+          const modeId = modeIdBase + index;
+          const label = `Vacuum (${RvcCleanMode.ModeTag[tag]})`;
+          supportedCleanModes.push({
+            label: label,
+            mode: modeId,
+            modeTags: [{ value: RvcCleanMode.ModeTag.Vacuum }, { value: tag }],
+          });
 
-          // Vacuum category (Matter modes 66-70)
-          const vacuumSource = modeMapping.vacuum;
-          if (operationModes.includes(vacuumSource) || (vacuumSource === 'vacuum' && operationModes.includes('vaccum'))) {
-            supportedCleanModes.push(...this.createIntensityVariants(vacuumSource, RvcCleanModeValue.VacuumQuiet, [RvcCleanMode.ModeTag.Vacuum], fanSpeedPresets));
-            if (vacuumSource !== 'vacuum') {
-              this.log.info(`[${vacuum.name}] Vacuum category: using '${vacuumSource}'`);
-            }
-          } else if (vacuumSource !== 'vacuum') {
-            this.log.warn(`[${vacuum.name}] Vacuum category: configured mode '${vacuumSource}' not supported by robot`);
-          }
+          vacuum.modeMap.set(modeId, {
+            fanSpeed: preset,
+            waterUsage: undefined,
+            operationMode: operationModeMap['vacuum'],
+          });
+        });
+      }
+      if (operatingModes?.includes(modeMapping.mop)) {
+        const modeIdBase = RvcCleanModeBase + vacuum.modeMap.size;
+        if (waterUsagePresets) {
+          waterUsagePresets.forEach((preset, index) => {
+            const tag = presetToTagMap[preset] || RvcCleanMode.ModeTag.Auto;
+            const modeId = modeIdBase + index;
+            const label = `Mop (${RvcCleanMode.ModeTag[tag]})`;
+            supportedCleanModes.push({
+              label: label,
+              mode: modeId,
+              modeTags: [{ value: RvcCleanMode.ModeTag.Mop }, { value: tag }],
+            });
 
-          // Mop category (Matter modes 31-34)
-          const mopSource = modeMapping.mop;
-          if (operationModes.includes(mopSource)) {
-            supportedCleanModes.push(...this.createMopVariants(fanSpeedPresets, waterUsagePresets));
-            if (mopSource !== 'mop') {
-              this.log.info(`[${vacuum.name}] Mop category: using '${mopSource}'`);
-            }
-          } else if (mopSource !== 'mop') {
-            this.log.warn(`[${vacuum.name}] Mop category: configured mode '${mopSource}' not supported by robot`);
-          }
-
-          // Vacuum & Mop category (Matter modes 5-9)
-          const vacuumMopSource = modeMapping.vacuumAndMop;
-          if (operationModes.includes(vacuumMopSource)) {
-            supportedCleanModes.push(
-              ...this.createIntensityVariants(vacuumMopSource, RvcCleanModeValue.VacuumMopQuiet, [RvcCleanMode.ModeTag.Mop, RvcCleanMode.ModeTag.Vacuum], fanSpeedPresets),
-            );
-            if (vacuumMopSource !== 'vacuum_and_mop') {
-              this.log.info(`[${vacuum.name}] Vacuum & Mop category: using '${vacuumMopSource}'`);
-            }
-          } else if (vacuumMopSource !== 'vacuum_and_mop') {
-            this.log.warn(`[${vacuum.name}] Vacuum & Mop category: configured mode '${vacuumMopSource}' not supported by robot`);
+            vacuum.modeMap.set(modeId, {
+              fanSpeed: undefined,
+              waterUsage: preset,
+              operationMode: operationModeMap['mop'],
+            });
+          });
+        } else {
+          supportedCleanModes.push({
+            label: `Mop (Auto)`,
+            mode: modeIdBase,
+            modeTags: [{ value: RvcCleanMode.ModeTag.Mop }, { value: RvcCleanMode.ModeTag.Auto }],
+          });
+          vacuum.modeMap.set(modeIdBase, {
+            fanSpeed: undefined,
+            waterUsage: 'med',
+            operationMode: operationModeMap['mop'],
+          });
+        }
+      }
+      if (operatingModes?.includes(modeMapping.vacuumAndMop)) {
+        const modeIdBase = RvcCleanModeBase + vacuum.modeMap.size;
+        if (fanSpeedPresets && waterUsagePresets) {
+          const nFanSpeeds = fanSpeedPresets.length;
+          const nWaterLevels = waterUsagePresets.length;
+          for (let i = 0; i < Math.max(nFanSpeeds, nWaterLevels); i++) {
+            const fanSpeed = fanSpeedPresets[i] ?? fanSpeedPresets[nFanSpeeds - 1];
+            const waterUsage = waterUsagePresets[i] ?? waterUsagePresets[nWaterLevels - 1];
+            const tag = presetToTagMap[fanSpeedPresets[i] ?? waterUsagePresets[i]];
+            const modeId = modeIdBase + i;
+            const label = `Vacuum & Mop (${RvcCleanMode.ModeTag[tag]})`;
+            supportedCleanModes.push({
+              label: label,
+              mode: modeId,
+              modeTags: [{ value: RvcCleanMode.ModeTag.Vacuum }, { value: RvcCleanMode.ModeTag.Mop }, { value: tag }],
+            });
+            vacuum.modeMap.set(modeId, {
+              fanSpeed: fanSpeed,
+              waterUsage: waterUsage,
+              operationMode: operationModeMap['vacuumAndMop'],
+            });
           }
         }
       }
-
-      // Deduplicate modes by label (Matter requires unique labels)
-      const seenLabels = new Set<string>();
-      const deduplicatedModes = supportedCleanModes.filter((mode) => {
-        if (seenLabels.has(mode.label)) {
-          this.log.debug(`[${vacuum.name}] Skipping duplicate mode label: ${mode.label}`);
-          return false;
-        }
-        seenLabels.add(mode.label);
-        return true;
-      });
-      supportedCleanModes.length = 0;
-      supportedCleanModes.push(...deduplicatedModes);
 
       if (supportedCleanModes.length === 0) {
         supportedCleanModes.push({
           label: 'Vacuum',
-          mode: 66,
+          mode: RvcCleanModeBase,
           modeTags: [{ value: RvcCleanMode.ModeTag.Vacuum }, { value: RvcCleanMode.ModeTag.Auto }],
         });
+        vacuum.modeMap.set(RvcCleanModeBase, {
+          fanSpeed: undefined,
+          waterUsage: undefined,
+          operationMode: undefined,
+        });
       }
+      this.log.debug(`Supported clean modes: ${JSON.stringify(supportedCleanModes)}`);
 
       // Create Matter device
       const useServerMode = (this.config as { enableServerMode?: boolean }).enableServerMode === true;
@@ -553,9 +583,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         vacuum.name,
         vacuum.id,
         useServerMode ? 'server' : undefined,
-        1,
+        RvcRunModeValue.Idle,
         supportedRunModes,
-        supportedCleanModes.length > 0 ? supportedCleanModes[0].mode : 1,
+        supportedCleanModes[0].mode, // we already check .length > 0
         supportedCleanModes,
         null,
         null,
@@ -702,19 +732,24 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         }
       } else {
         // Clean mode change
-        const settings = this.getIntensitySettings(request.newMode);
-        const mode = this.getBaseModeFromNumber(request.newMode);
+        const modeConfig = vacuum.modeMap.get(request.newMode);
+        const fanSpeed = modeConfig?.fanSpeed;
+        const waterUsage = modeConfig?.waterUsage;
 
-        if (mode) {
-          this.log.info(`[${vacuum.name}] Setting mode '${mode}' with fan '${settings.fan}', water '${settings.water}'`);
-          await vacuum.client.setOperationMode(mode);
-
-          if (settings.fan && vacuum.capabilities.includes('FanSpeedControlCapability')) {
-            await vacuum.client.setFanSpeed(settings.fan);
+        if (modeConfig) {
+          if (modeConfig.operationMode) {
+            this.log.info(`[${vacuum.name}] Setting mode '${modeConfig.operationMode}'`);
+            await vacuum.client.setOperationMode(modeConfig.operationMode);
           }
 
-          if (settings.water && vacuum.capabilities.includes('WaterUsageControlCapability')) {
-            await vacuum.client.setWaterUsage(settings.water);
+          if (fanSpeed && vacuum.capabilities.includes('FanSpeedControlCapability')) {
+            this.log.info(`[${vacuum.name}] Setting fan '${fanSpeed}'`);
+            await vacuum.client.setFanSpeed(fanSpeed);
+          }
+
+          if (waterUsage && vacuum.capabilities.includes('WaterUsageControlCapability')) {
+            this.log.info(`[${vacuum.name}] Setting water '${waterUsage}'`);
+            await vacuum.client.setWaterUsage(waterUsage);
           }
         }
       }
@@ -766,17 +801,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
       this.log.info(`[${vacuum.name}] Selected rooms: ${roomNames.join(', ')}`);
     });
-  }
-
-  /**
-   * Get base mode from mode number
-   */
-  private getBaseModeFromNumber(mode: number): string {
-    const modeMapping = this.getModeMapping();
-    if (mode >= 66 && mode <= 70) return modeMapping.vacuum;
-    if (mode >= 31 && mode <= 42) return modeMapping.mop;
-    if (mode >= 5 && mode <= 9) return modeMapping.vacuumAndMop;
-    return '';
   }
 
   /**
@@ -1199,106 +1223,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   }
 
   /**
-   * Create intensity variants for a cleaning mode
-   */
-  private createIntensityVariants(
-    baseMode: string,
-    baseModeNumber: number,
-    baseTags: number[],
-    fanSpeedPresets: string[] | null,
-  ): Array<{ label: string; mode: number; modeTags: Array<{ value: number }> }> {
-    const modes: Array<{ label: string; mode: number; modeTags: Array<{ value: number }> }> = [];
-
-    const intensityMap: Record<string, { tag: number; label: string; offset: number }> = {
-      off: { tag: RvcCleanMode.ModeTag.Min, label: 'Off', offset: 4 },
-      min: { tag: RvcCleanMode.ModeTag.Min, label: 'Min', offset: 4 },
-      low: { tag: RvcCleanMode.ModeTag.Quiet, label: 'Quiet', offset: 0 },
-      medium: { tag: RvcCleanMode.ModeTag.Auto, label: 'Auto', offset: 1 },
-      high: { tag: RvcCleanMode.ModeTag.Quick, label: 'Quick', offset: 2 },
-      max: { tag: RvcCleanMode.ModeTag.Max, label: 'Max', offset: 3 },
-      turbo: { tag: RvcCleanMode.ModeTag.Max, label: 'Turbo', offset: 4 },
-    };
-
-    const modeLabel = baseMode === 'vacuum_and_mop' ? 'Vacuum & Mop' : baseMode.charAt(0).toUpperCase() + baseMode.slice(1);
-
-    if (!fanSpeedPresets || fanSpeedPresets.length === 0) {
-      modes.push({
-        label: modeLabel,
-        mode: baseModeNumber,
-        modeTags: [...baseTags.map((tag) => ({ value: tag })), { value: RvcCleanMode.ModeTag.Auto }],
-      });
-      return modes;
-    }
-
-    const usedOffsets = new Set<number>();
-
-    for (const preset of fanSpeedPresets) {
-      const presetLower = preset.toLowerCase();
-      const intensity = intensityMap[presetLower];
-
-      if (intensity && !usedOffsets.has(intensity.offset)) {
-        usedOffsets.add(intensity.offset);
-        modes.push({
-          label: `${modeLabel} (${intensity.label})`,
-          mode: baseModeNumber + intensity.offset,
-          modeTags: [...baseTags.map((tag) => ({ value: tag })), { value: intensity.tag }],
-        });
-      }
-    }
-
-    if (modes.length === 0) {
-      modes.push({
-        label: modeLabel,
-        mode: baseModeNumber,
-        modeTags: [...baseTags.map((tag) => ({ value: tag })), { value: RvcCleanMode.ModeTag.Auto }],
-      });
-    }
-
-    return modes;
-  }
-
-  /**
-   * Create mop mode variants
-   */
-  private createMopVariants(fanSpeedPresets: string[] | null, waterUsagePresets: string[] | null): Array<{ label: string; mode: number; modeTags: Array<{ value: number }> }> {
-    if (!fanSpeedPresets || !waterUsagePresets) {
-      return this.createIntensityVariants('mop', RvcCleanModeValue.MopMin, [RvcCleanMode.ModeTag.Mop], fanSpeedPresets);
-    }
-
-    const modes: Array<{ label: string; mode: number; modeTags: Array<{ value: number }> }> = [];
-    const usedLabels = new Set<string>();
-
-    const mopConfigs: Array<{ fanPreset: string; waterPreset: string; tag: number; label: string; mode: number }> = [
-      { fanPreset: 'medium', waterPreset: 'medium', tag: RvcCleanMode.ModeTag.Auto, label: 'Mop (Auto)', mode: RvcCleanModeValue.MopMin },
-      { fanPreset: 'low', waterPreset: 'low', tag: RvcCleanMode.ModeTag.Quiet, label: 'Mop (Quiet)', mode: RvcCleanModeValue.MopLow },
-      { fanPreset: 'high', waterPreset: 'high', tag: RvcCleanMode.ModeTag.Quick, label: 'Mop (Quick)', mode: RvcCleanModeValue.MopMedium },
-      { fanPreset: 'max', waterPreset: 'high', tag: RvcCleanMode.ModeTag.Max, label: 'Mop (Max)', mode: RvcCleanModeValue.MopHigh },
-    ];
-
-    for (const config of mopConfigs) {
-      const hasFan = fanSpeedPresets.includes(config.fanPreset);
-      const hasWater = waterUsagePresets.includes(config.waterPreset);
-
-      if (hasFan && hasWater && !usedLabels.has(config.label)) {
-        usedLabels.add(config.label);
-        modes.push({
-          label: config.label,
-          mode: config.mode,
-          modeTags: [{ value: RvcCleanMode.ModeTag.Mop }, { value: config.tag }],
-        });
-      }
-    }
-
-    if (modes.length === 0) {
-      return this.createIntensityVariants('mop', RvcCleanModeValue.MopMin, [RvcCleanMode.ModeTag.Mop], fanSpeedPresets);
-    }
-
-    return modes;
-  }
-
-  /**
    * Get fan and water settings from mode number
    */
+  /*
   private getIntensitySettings(mode: number): { fan: string; water: string } {
     let intensityKey: 'auto' | 'quiet' | 'quick' | 'max';
     let defaultFan: string;
@@ -1361,6 +1288,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       water: overrides?.waterUsage || defaultWater,
     };
   }
+  */
 
   /**
    * Get friendly name for a consumable

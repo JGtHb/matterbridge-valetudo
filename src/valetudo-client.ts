@@ -28,6 +28,10 @@ export interface ValetudoRobotInfo {
   implementation: string;
 }
 
+export interface ValetudoCustomizations {
+  friendlyName?: string;
+}
+
 export type BatteryFlag = 'none' | 'charging' | 'discharging' | 'charged';
 export type AttachmentType = 'dustbin' | 'watertank' | 'mop';
 export type PresetType = 'fan_speed' | 'water_grade' | 'operation_mode';
@@ -210,6 +214,18 @@ export class ValetudoClient {
       return data as ValetudoInfo;
     } catch (error) {
       this.log.error(`Error fetching Valetudo info: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  async getCustomizations(): Promise<ValetudoCustomizations | null> {
+    try {
+      const url = `${this.baseUrl}/api/v2/valetudo/config/customizations`;
+      const data = await this.httpGet(url);
+      this.log.debug(`Customizations recieved: ${JSON.stringify(data)}`);
+      return data as ValetudoCustomizations;
+    } catch (error) {
+      this.log.error(`Error fetching customizations: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
   }
