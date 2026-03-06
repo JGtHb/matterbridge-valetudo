@@ -805,7 +805,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       consumables?: {
         enabled?: boolean;
         exposeAsContactSensors?: boolean;
-        maxLifetimes?: Record<string, number>;
         warningThreshold?: number;
       };
     };
@@ -1110,7 +1109,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
     const config = this.config as {
       consumables?: {
-        maxLifetimes?: Record<string, number>;
         warningThreshold?: number;
       };
     };
@@ -1214,36 +1212,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     }
 
     return typeMap[key] || `${consumable.type} ${consumable.subType}`;
-  }
-
-  /**
-   * Get maximum lifetime for a consumable type from config
-   */
-  private getMaxLifetime(consumable: ValetudoConsumable, maxLifetimes: Record<string, number>): number {
-    // Special handling for percentage-based consumables (detergent, etc.)
-    // These have remaining values in 0-100 range representing percentage
-    if (consumable.remaining.value <= 100 && consumable.remaining.value >= 0) {
-      // Check if this looks like a percentage (detergent typically reports 0-100)
-      const isPercentage = consumable.type === 'consumable' || consumable.subType.includes('detergent') || consumable.subType.includes('dock');
-      if (isPercentage) {
-        return 100; // Max is 100%
-      }
-    }
-
-    let key: string;
-    if (consumable.type === 'brush' && consumable.subType === 'main') {
-      key = 'mainBrush';
-    } else if (consumable.type === 'brush' && (consumable.subType === 'side_right' || consumable.subType === 'side_left')) {
-      key = 'sideBrush';
-    } else if (consumable.type === 'filter' && consumable.subType === 'main') {
-      key = 'dustFilter';
-    } else if (consumable.type === 'cleaning' && consumable.subType === 'sensor') {
-      key = 'sensor';
-    } else {
-      return 10000;
-    }
-
-    return maxLifetimes[key] || 10000;
   }
 
   /**
