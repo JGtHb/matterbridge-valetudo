@@ -135,92 +135,6 @@
           "description": "Create contact sensors for each consumable (open = needs replacement, closed = OK)",
           "type": "boolean",
           "default": false
-        },
-        "maxLifetimes": {
-          "title": "Maximum Lifetimes (minutes)",
-          "description": "Expected lifetime for each consumable type",
-          "type": "object",
-          "properties": {
-            "mainBrush": {
-              "title": "Main Brush",
-              "description": "Default: 18,000 minutes (300 hours)",
-              "type": "number",
-              "default": 18000,
-              "minimum": 60
-            },
-            "sideBrush": {
-              "title": "Side Brush",
-              "description": "Default: 12,000 minutes (200 hours)",
-              "type": "number",
-              "default": 12000,
-              "minimum": 60
-            },
-            "dustFilter": {
-              "title": "Dust Filter",
-              "description": "Default: 9,000 minutes (150 hours)",
-              "type": "number",
-              "default": 9000,
-              "minimum": 60
-            },
-            "sensor": {
-              "title": "Sensor Cleaning",
-              "description": "Default: 1,800 minutes (30 hours)",
-              "type": "number",
-              "default": 1800,
-              "minimum": 60
-            }
-          }
-        }
-      }
-    },
-    "customTags": {
-      "title": "Custom mode tags",
-      "description": "Manually map Valetudo presets to Matter Tags",
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "operationMode": {
-            "title": "Operation Mode Context",
-            "description": "Which operation mode does this apply to?",
-            "type": "array",
-            "uniqueItems": true,
-            "items": {
-              "type": "string",
-              "enum": ["vacuum", "mop", "vacuum_and_mop"]
-            },
-            "default": ["vacuum", "mop", "vacuum_and_mop"]
-          },
-          "fanSpeed": {
-            "title": "Fan Speed",
-            "description": "e.g., 'low', 'medium', 'high', 'max'",
-            "type": "string",
-            "default": "medium"
-          },
-          "waterUsage": {
-            "title": "Water Usage",
-            "description": "For mop modes: 'min', 'low', 'medium', 'high', 'max'",
-            "type": "string",
-            "default": "medium"
-          },
-          "matterModeTag": {
-            "title": "Matter Mode",
-            "type": "number",
-            "oneOf": [
-              { "const": 0, "title": "Auto" },
-              { "const": 1, "title": "Quick" },
-              { "const": 2, "title": "Quiet" },
-              { "const": 3, "title": "LowNoise" },
-              { "const": 4, "title": "LowEnergy" },
-              { "const": 5, "title": "Vacation" },
-              { "const": 6, "title": "Min" },
-              { "const": 7, "title": "Max" },
-              { "const": 8, "title": "Night" },
-              { "const": 9, "title": "Day" },
-              { "const": 16384, "title": "DeepClean"}
-            ],
-            "default": 0
-          }
         }
       }
     },
@@ -251,31 +165,61 @@
         }
       }
     },
-    "modeMapping": {
-      "title": "Operation Mode Mapping",
-      "description": "Map Valetudo operation modes to Matter clean mode categories. Useful for robots that support vacuum_then_mop mode.",
-      "type": "object",
-      "properties": {
-        "vacuum": {
-          "title": "Vacuum Category Source",
-          "description": "Valetudo mode for Matter Vacuum modes (default: vacuum)",
-          "type": "string",
-          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
-          "default": "vacuum"
-        },
-        "mop": {
-          "title": "Mop Category Source",
-          "description": "Valetudo mode for Matter Mop modes (default: mop)",
-          "type": "string",
-          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
-          "default": "mop"
-        },
-        "vacuumAndMop": {
-          "title": "Vacuum & Mop Category Source",
-          "description": "Valetudo mode for Matter Vacuum & Mop modes (default: vacuum_and_mop)",
-          "type": "string",
-          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
-          "default": "vacuum_and_mop"
+    "customTags": {
+      "title": "Custom Mode Tags",
+      "description": "Manually map valetudo presets to matter tags",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["operationModes"],
+        "properties": {
+          "operationModes": {
+            "title": "Operation Modes",
+            "description": "Which valetudo operation mode(s) does this mapping apply to?",
+            "type": "array",
+            "uniqueItems": true,
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"]
+            },
+            "default": ["vacuum", "mop", "vacuum_and_mop"]
+          },
+          "mappings": {
+            "title": "Preset Mappings",
+            "description": "Define the fan speed and/or water usage mappings for the selected mode(s)",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "fanSpeed": {
+                  "title": "Fan Speed",
+                  "description": "e.g., 'low', 'medium', 'high', 'max'",
+                  "type": "string",
+                  "default": "medium"
+                },
+                "waterUsage": {
+                  "title": "Water Usage",
+                  "description": "For mop modes: 'min', 'low', 'medium', 'high', 'max'",
+                  "type": "string",
+                  "default": "medium"
+                },
+                "matterModeTag": {
+                  "title": "Matter Mode",
+                  "type": "number",
+                  "oneOf": [
+                    { "const": 0, "title": "Auto" },
+                    { "const": 1, "title": "Quick" },
+                    { "const": 2, "title": "Quiet" },
+                    { "const": 6, "title": "Min" },
+                    { "const": 7, "title": "Max" },
+                    { "const": 16384, "title": "DeepClean"}
+                  ],
+                  "default": 0
+                }
+              }
+            }
+          }
         }
       }
     },

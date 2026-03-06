@@ -10,13 +10,13 @@
 import { MatterbridgeDynamicPlatform, PlatformConfig, MatterbridgeEndpoint, contactSensor } from 'matterbridge';
 import { RoboticVacuumCleaner } from 'matterbridge/devices';
 import { AnsiLogger, LogLevel } from 'matterbridge/logger';
-import { RvcCleanMode, RvcRunMode } from 'matterbridge/matter/clusters';
+import { RvcCleanMode, RvcOperationalState, RvcRunMode } from 'matterbridge/matter/clusters';
 
 // Derive PlatformMatterbridge type from the parent class constructor to avoid
 // import resolution issues across different npm dependency tree layouts.
 type PlatformMatterbridge = ConstructorParameters<typeof MatterbridgeDynamicPlatform>[0];
 
-import { ValetudoClient, BatteryStateAttribute, ValetudoConsumable, CachedMapLayers } from './valetudo-client.js';
+import { BatteryStateAttribute, CachedMapLayers, ConsumableProperties, PresetLevel, ValetudoClient, ValetudoConsumable, ValetudoOperationMode } from './valetudo-client.js';
 import { ValetudoDiscovery } from './valetudo-discovery.js';
 
 /**
@@ -33,11 +33,11 @@ interface VacuumInstance {
   // Per-vacuum state
   capabilities: string[];
   operationModes: string[];
-  modeMap: Map<number, { fanSpeed?: string; waterUsage?: string; operationMode?: string }>;
+  modeMap: Map<number, { fanSpeed?: PresetLevel; waterUsage?: PresetLevel; operationMode?: ValetudoOperationMode }>;
   areaToSegmentMap: Map<number, { id: string; name: string }>;
   selectedSegmentIds: string[];
   selectedRoomNames: string[];
-  consumableMap: Map<string, { endpoint?: MatterbridgeEndpoint; consumable: ValetudoConsumable; lastState?: boolean }>;
+  consumableMap: Map<string, { endpoint?: MatterbridgeEndpoint; consumable: ValetudoConsumable; properties: ConsumableProperties; lastState?: boolean }>;
   mapLayersCache: CachedMapLayers | null;
   mapCacheValidUntil: number;
   lastCurrentArea: number | null;
@@ -66,19 +66,6 @@ const enum RvcRunModeValue {
 }
 
 const RvcCleanModeBase = 5;
-
-/**
- * Matter Operational State enum values
- */
-const enum OperationalStateValue {
-  Stopped = 0x00,
-  Running = 0x01,
-  Paused = 0x02,
-  Error = 0x03,
-  SeekingCharger = 0x40,
-  Charging = 0x41,
-  Docked = 0x42,
-}
 
 /**
  * Plugin initialization function - standard Matterbridge plugin interface.
@@ -454,9 +441,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       // Build clean modes
       const supportedCleanModes: Array<{ label: string; mode: number; modeTags: Array<{ value: number }> }> = [];
 
-      let fanSpeedPresets: string[] | null = null;
-      let waterUsagePresets: string[] | null = null;
-      const operatingModes = vacuum.capabilities.includes('OperationModeControlCapability') ? await vacuum.client.getOperationModePresets() : null;
+      let fanSpeedPresets: PresetLevel[] | null = null;
+      let waterUsagePresets: PresetLevel[] | null = null;
+      const operatingModes = (vacuum.capabilities.includes('OperationModeControlCapability') ? await vacuum.client.getOperationModePresets() : null) ?? ['vacuum'];
 
       if (vacuum.capabilities.includes('FanSpeedControlCapability')) {
         const presets = await vacuum.client.getFanSpeedPresets();
@@ -470,131 +457,102 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
           waterUsagePresets = presets.filter((preset) => preset !== 'off');
         }
       }
-      const modeMapping = this.getModeMapping();
-      const operationModeMap: Record<string, string | undefined> = {
-        vacuum: operatingModes?.includes(modeMapping.vacuum) ? modeMapping.vacuum : undefined,
-        mop: operatingModes?.includes(modeMapping.mop) ? modeMapping.mop : undefined,
-        vacuumAndMop: operatingModes?.includes(modeMapping.vacuumAndMop) ? modeMapping.vacuumAndMop : undefined,
-      };
 
-      type OperationModeContext = 'vacuum' | 'mop' | 'vacuum_and_mop';
+      const valetudoToMatterTags: Record<ValetudoOperationMode, RvcCleanMode.ModeTag[]> = {
+        vacuum: [RvcCleanMode.ModeTag.Vacuum],
+        mop: [RvcCleanMode.ModeTag.Mop],
+        vacuum_and_mop: [RvcCleanMode.ModeTag.Vacuum, RvcCleanMode.ModeTag.Mop],
+        vacuum_then_mop: [RvcCleanMode.ModeTag.VacuumThenMop],
+      };
 
       const config = this.config as {
         customTags?: Array<{
-          operationMode: Array<OperationModeContext>;
-          fanSpeed: string;
-          waterUsage: string;
-          matterModeTag: number;
+          operationModes: Array<ValetudoOperationMode>;
+          mappings: Array<{
+            fanSpeed?: PresetLevel;
+            waterUsage?: PresetLevel;
+            matterModeTag: RvcCleanMode.ModeTag;
+          }>;
         }>;
       };
 
-      const customTagMap: Record<OperationModeContext, Record<string, number>> = {
-        vacuum: {},
-        mop: {},
-        vacuum_and_mop: {},
-      };
-      if (config.customTags && config.customTags.length > 0) {
-        for (const customTag of config.customTags) {
-          const modeTag = customTag.matterModeTag;
-          const contexts: Array<OperationModeContext> = customTag.operationMode;
-          for (const ctx of contexts) {
-            if (customTag.fanSpeed) {
-              customTagMap[ctx][customTag.fanSpeed] = modeTag;
-            }
-            if (customTag.waterUsage) {
-              customTagMap[ctx][customTag.waterUsage] = modeTag;
-            }
-          }
-        }
-      }
-
-      const presetToTagMap: Record<string, number> = {
-        off: RvcCleanMode.ModeTag.Min,
+      const defaultPresetToTagMap: Record<string, RvcCleanMode.ModeTag> = {
         min: RvcCleanMode.ModeTag.Min,
         low: RvcCleanMode.ModeTag.Quiet,
         medium: RvcCleanMode.ModeTag.Auto,
         high: RvcCleanMode.ModeTag.Quick,
         max: RvcCleanMode.ModeTag.Max,
-        turbo: RvcCleanMode.ModeTag.Max,
+        turbo: RvcCleanMode.ModeTag.DeepClean,
+        custom: RvcCleanMode.ModeTag.LowNoise,
       };
 
-      if (fanSpeedPresets) {
-        const customTags = customTagMap['vacuum'];
-        const modeIdBase = RvcCleanModeBase + vacuum.modeMap.size;
-        fanSpeedPresets.forEach((preset, index) => {
-          const tag = customTags[preset] ?? presetToTagMap[preset] ?? RvcCleanMode.ModeTag.Auto;
-          const modeId = modeIdBase + index;
-          const label = `Vacuum (${RvcCleanMode.ModeTag[tag]})`;
-          supportedCleanModes.push({
-            label: label,
-            mode: modeId,
-            modeTags: [{ value: RvcCleanMode.ModeTag.Vacuum }, { value: tag }],
+      // We create the mapping first then we create the modes
+      const tagPresetMap: Record<ValetudoOperationMode, Map<RvcCleanMode.ModeTag, { fanSpeed?: PresetLevel; waterUsage?: PresetLevel }>> = {
+        vacuum: new Map(),
+        mop: new Map(),
+        vacuum_and_mop: new Map(),
+        vacuum_then_mop: new Map(),
+      };
+      for (const opMode of operatingModes) {
+        if (opMode === 'vacuum' && fanSpeedPresets) {
+          fanSpeedPresets.forEach((preset, _) => {
+            tagPresetMap[opMode].set(defaultPresetToTagMap[preset], { fanSpeed: preset });
           });
-
-          vacuum.modeMap.set(modeId, {
-            fanSpeed: preset,
-            waterUsage: undefined,
-            operationMode: operationModeMap['vacuum'],
+        } else if (opMode === 'mop' && waterUsagePresets) {
+          waterUsagePresets.forEach((preset, _) => {
+            tagPresetMap[opMode].set(defaultPresetToTagMap[preset], { waterUsage: preset });
           });
-        });
-      }
-      if (operatingModes?.includes(modeMapping.mop)) {
-        const customTags = customTagMap['mop'];
-        const modeIdBase = RvcCleanModeBase + vacuum.modeMap.size;
-        if (waterUsagePresets) {
-          waterUsagePresets.forEach((preset, index) => {
-            const tag = customTags[preset] ?? presetToTagMap[preset] ?? RvcCleanMode.ModeTag.Auto;
-            const modeId = modeIdBase + index;
-            const label = `Mop (${RvcCleanMode.ModeTag[tag]})`;
-            supportedCleanModes.push({
-              label: label,
-              mode: modeId,
-              modeTags: [{ value: RvcCleanMode.ModeTag.Mop }, { value: tag }],
-            });
-
-            vacuum.modeMap.set(modeId, {
-              fanSpeed: undefined,
-              waterUsage: preset,
-              operationMode: operationModeMap['mop'],
-            });
-          });
-        } else {
-          supportedCleanModes.push({
-            label: `Mop (Auto)`,
-            mode: modeIdBase,
-            modeTags: [{ value: RvcCleanMode.ModeTag.Mop }, { value: RvcCleanMode.ModeTag.Auto }],
-          });
-          vacuum.modeMap.set(modeIdBase, {
-            fanSpeed: undefined,
-            waterUsage: 'med',
-            operationMode: operationModeMap['mop'],
-          });
-        }
-      }
-      if (operatingModes?.includes(modeMapping.vacuumAndMop)) {
-        const customTags = customTagMap['vacuum_and_mop'];
-        const modeIdBase = RvcCleanModeBase + vacuum.modeMap.size;
-        if (fanSpeedPresets && waterUsagePresets) {
+        } else if ((opMode === 'vacuum_and_mop' || opMode === 'vacuum_then_mop') && fanSpeedPresets && waterUsagePresets) {
           const nFanSpeeds = fanSpeedPresets.length;
           const nWaterLevels = waterUsagePresets.length;
-          for (let i = 0; i < Math.max(nFanSpeeds, nWaterLevels); i++) {
-            const fanSpeed = fanSpeedPresets[i] ?? fanSpeedPresets[nFanSpeeds - 1];
-            const waterUsage = waterUsagePresets[i] ?? waterUsagePresets[nWaterLevels - 1];
-            const preset = fanSpeedPresets[i] ?? waterUsagePresets[i];
-            const tag = customTags[preset] ?? presetToTagMap[preset];
-            const modeId = modeIdBase + i;
-            const label = `Vacuum & Mop (${RvcCleanMode.ModeTag[tag]})`;
-            supportedCleanModes.push({
-              label: label,
-              mode: modeId,
-              modeTags: [{ value: RvcCleanMode.ModeTag.Vacuum }, { value: RvcCleanMode.ModeTag.Mop }, { value: tag }],
-            });
-            vacuum.modeMap.set(modeId, {
-              fanSpeed: fanSpeed,
-              waterUsage: waterUsage,
-              operationMode: operationModeMap['vacuumAndMop'],
+          const drivingPreset = nFanSpeeds > nWaterLevels ? fanSpeedPresets : waterUsagePresets;
+          for (let i = 0; i < drivingPreset.length; i++) {
+            tagPresetMap[opMode].set(defaultPresetToTagMap[drivingPreset[i]], {
+              fanSpeed: fanSpeedPresets[i] ?? fanSpeedPresets[nFanSpeeds - 1],
+              waterUsage: waterUsagePresets[i] ?? waterUsagePresets[nWaterLevels - 1],
             });
           }
+        }
+      }
+
+      if (config.customTags && config.customTags.length > 0) {
+        for (const tagGroup of config.customTags) {
+          const selectedModes = tagGroup.operationModes || [];
+          const mappings = tagGroup.mappings || [];
+          for (const opMode of selectedModes) {
+            for (const mapping of mappings) {
+              tagPresetMap[opMode].set(mapping.matterModeTag, {
+                fanSpeed: mapping.fanSpeed,
+                waterUsage: mapping.waterUsage,
+              });
+            }
+          }
+        }
+      }
+      const formatLabel = (opMode: ValetudoOperationMode, intensityTag?: RvcCleanMode.ModeTag): string => {
+        const modeName = opMode
+          .split('_')
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(' ');
+        return intensityTag != undefined ? `${modeName} (${RvcCleanMode.ModeTag[intensityTag]})` : modeName;
+      };
+
+      let modeId = RvcCleanModeBase;
+      for (const [opModeStr, tagMap] of Object.entries(tagPresetMap)) {
+        const opMode = opModeStr as ValetudoOperationMode;
+        const baseTags = valetudoToMatterTags[opMode];
+        for (const [matterMode, presets] of tagMap) {
+          this.log.debug(`Building mode for opMode: ${opMode}, matterTag: ${matterMode}, presets: ${JSON.stringify(presets)}`);
+          supportedCleanModes.push({
+            label: formatLabel(opMode, matterMode),
+            mode: modeId,
+            modeTags: [...baseTags.map((tag) => ({ value: tag })), { value: matterMode }],
+          });
+          vacuum.modeMap.set(modeId, {
+            ...presets,
+            operationMode: opMode,
+          });
+          modeId++;
         }
       }
 
@@ -773,7 +731,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         const waterUsage = modeConfig?.waterUsage;
 
         if (modeConfig) {
-          if (modeConfig.operationMode) {
+          if (modeConfig.operationMode && vacuum.capabilities.includes('OperationModeControlCapability')) {
             this.log.info(`[${vacuum.name}] Setting mode '${modeConfig.operationMode}'`);
             await vacuum.client.setOperationMode(modeConfig.operationMode);
           }
@@ -840,18 +798,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   }
 
   /**
-   * Get the configured mode mapping with defaults
-   */
-  private getModeMapping(): { vacuum: string; mop: string; vacuumAndMop: string } {
-    const config = this.config as { modeMapping?: { vacuum?: string; mop?: string; vacuumAndMop?: string } };
-    return {
-      vacuum: config.modeMapping?.vacuum || 'vacuum',
-      mop: config.modeMapping?.mop || 'mop',
-      vacuumAndMop: config.modeMapping?.vacuumAndMop || 'vacuum_and_mop',
-    };
-  }
-
-  /**
    * Set up consumables for a specific vacuum
    */
   private async setupConsumablesForVacuum(vacuum: VacuumInstance): Promise<void> {
@@ -881,28 +827,24 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     }
 
     this.log.info(`[${vacuum.name}] Found ${consumables.length} consumables`);
-
-    const maxLifetimes = config.consumables?.maxLifetimes || {
-      mainBrush: 18000,
-      sideBrush: 12000,
-      dustFilter: 9000,
-      sensor: 1800,
-    };
-
     const exposeAsContactSensors = config.consumables?.exposeAsContactSensors === true;
 
-    const warningThreshold = config.consumables?.warningThreshold ?? 10;
+    const warningThreshold = (config.consumables?.warningThreshold ?? 10) / 100;
+    const consumableProperties = await vacuum.client.getConsumablesProperties();
 
     for (const consumable of consumables) {
       const name = this.getConsumableName(consumable);
-      const maxLifetime = this.getMaxLifetime(consumable, maxLifetimes);
-      const remainingMinutes = consumable.remaining.value;
-      const lifePercent = Math.round((remainingMinutes / maxLifetime) * 100);
-      const needsReplacement = lifePercent <= warningThreshold;
+      const matchingProperties = consumableProperties?.find((prop) => prop.type === consumable.type && prop.subType === consumable.subType);
+      if (!matchingProperties) {
+        this.log.info(`No properties fround for consumable ${name}`);
+        continue;
+      }
+      const remaining = consumable.remaining.value;
 
-      this.log.info(`  ${name}: ${remainingMinutes}min (${lifePercent}%)`);
+      this.log.info(`  ${name}: ${remaining} ${consumable.remaining.unit}`);
 
       if (exposeAsContactSensors) {
+        const needsReplacement = remaining / matchingProperties.maxValue <= warningThreshold;
         // Create contact sensor for this consumable
         // Contact sensor: true (closed) = OK, false (open) = needs replacement
         const sensorName = `${vacuum.name} ${name}`;
@@ -916,10 +858,10 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
         await this.registerDevice(sensor);
 
-        vacuum.consumableMap.set(name, { endpoint: sensor, consumable, lastState: needsReplacement });
+        vacuum.consumableMap.set(name, { endpoint: sensor, consumable: consumable, properties: matchingProperties, lastState: needsReplacement });
         this.log.info(`  Contact sensor registered: ${sensorName} (${needsReplacement ? 'OPEN - needs replacement' : 'CLOSED - OK'})`);
       } else {
-        vacuum.consumableMap.set(name, { consumable });
+        vacuum.consumableMap.set(name, { consumable: consumable, properties: matchingProperties });
       }
     }
   }
@@ -1173,17 +1115,13 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       };
     };
 
-    const maxLifetimes = config.consumables?.maxLifetimes || {
-      mainBrush: 18000,
-      sideBrush: 12000,
-      dustFilter: 9000,
-      sensor: 1800,
-    };
-    const warningThreshold = config.consumables?.warningThreshold || 10;
+    const warningThreshold = (config.consumables?.warningThreshold || 10) / 100;
 
     try {
       const consumables = await vacuum.client.getConsumables();
       if (!consumables) return;
+      const consumableProperties = await vacuum.client.getConsumablesProperties();
+      if (!consumableProperties) return;
 
       for (const consumable of consumables) {
         const name = this.getConsumableName(consumable);
@@ -1191,17 +1129,14 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
         if (!entry) continue;
 
-        const maxLifetime = this.getMaxLifetime(consumable, maxLifetimes);
-        const remainingMinutes = consumable.remaining.value;
-        const lifePercent = Math.round((remainingMinutes / maxLifetime) * 100);
-
-        entry.consumable = consumable;
-        const needsReplacement = lifePercent <= warningThreshold;
+        const remaining = consumable.remaining.value;
+        entry.consumable.remaining.value = remaining;
+        const needsReplacement = remaining / entry.properties.maxValue <= warningThreshold;
 
         // Log status change
         if (entry.lastState === undefined || entry.lastState !== needsReplacement) {
           const status = needsReplacement ? '⚠️ NEEDS REPLACEMENT' : '✓ OK';
-          this.log.info(`[${vacuum.name}] ${name}: ${remainingMinutes}min (${lifePercent}%) - ${status}`);
+          this.log.info(`[${vacuum.name}] ${name}: ${remaining} ${consumable.remaining.unit} - ${status}`);
           entry.lastState = needsReplacement;
         }
 
@@ -1221,24 +1156,24 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   private mapValetudoStatusToOperationalState(status: string, dockStatus?: string): number {
     const statusLower = status.toLowerCase();
 
-    const statusMap: Record<string, number> = {
-      idle: OperationalStateValue.Docked,
-      docked: OperationalStateValue.Docked,
-      cleaning: OperationalStateValue.Running,
-      returning: OperationalStateValue.SeekingCharger,
-      manual_control: OperationalStateValue.Running,
-      moving: OperationalStateValue.Docked,
-      paused: OperationalStateValue.Paused,
-      error: OperationalStateValue.Error,
-      charging: OperationalStateValue.Charging,
+    const statusMap: Record<string, RvcOperationalState.OperationalState> = {
+      idle: RvcOperationalState.OperationalState.Docked,
+      docked: RvcOperationalState.OperationalState.Docked,
+      cleaning: RvcOperationalState.OperationalState.Running,
+      returning: RvcOperationalState.OperationalState.SeekingCharger,
+      manual_control: RvcOperationalState.OperationalState.Running,
+      moving: RvcOperationalState.OperationalState.Docked,
+      paused: RvcOperationalState.OperationalState.Paused,
+      error: RvcOperationalState.OperationalState.Error,
+      charging: RvcOperationalState.OperationalState.Charging,
     };
 
-    const baseState = statusMap[statusLower] ?? OperationalStateValue.Stopped;
+    const baseState = statusMap[statusLower] ?? RvcOperationalState.OperationalState.Stopped;
 
     if (dockStatus && (statusLower === 'docked' || statusLower === 'idle' || statusLower === 'charging')) {
       const dockStatusLower = dockStatus.toLowerCase();
       if (dockStatusLower === 'emptying' || dockStatusLower === 'drying' || dockStatusLower === 'cleaning') {
-        return OperationalStateValue.Docked;
+        return RvcOperationalState.OperationalState.Docked;
       }
     }
 
@@ -1259,77 +1194,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   }
 
   /**
-   * Get fan and water settings from mode number
-   */
-  /*
-  private getIntensitySettings(mode: number): { fan: string; water: string } {
-    let intensityKey: 'auto' | 'quiet' | 'quick' | 'max';
-    let defaultFan: string;
-    let defaultWater: string;
-
-    if (mode >= RvcCleanModeValue.VacuumQuiet && mode <= RvcCleanModeValue.VacuumTurbo) {
-      const offset = mode - RvcCleanModeValue.VacuumQuiet;
-      const offsetMap: Record<number, { key: 'auto' | 'quiet' | 'quick' | 'max'; fan: string; water: string }> = {
-        0: { key: 'quiet', fan: 'low', water: 'low' },
-        1: { key: 'auto', fan: 'medium', water: 'medium' },
-        2: { key: 'quick', fan: 'high', water: 'high' },
-        3: { key: 'max', fan: 'max', water: 'high' },
-        4: { key: 'max', fan: 'turbo', water: 'high' },
-      };
-      const mapping = offsetMap[offset] || offsetMap[1];
-      intensityKey = mapping.key;
-      defaultFan = mapping.fan;
-      defaultWater = mapping.water;
-    } else if (mode >= RvcCleanModeValue.MopMin && mode <= RvcCleanModeValue.MopHigh) {
-      const modeMap: Record<number, { key: 'auto' | 'quiet' | 'quick' | 'max'; fan: string; water: string }> = {
-        [RvcCleanModeValue.MopMin]: { key: 'auto', fan: 'medium', water: 'medium' },
-        [RvcCleanModeValue.MopLow]: { key: 'quiet', fan: 'low', water: 'low' },
-        [RvcCleanModeValue.MopMedium]: { key: 'quick', fan: 'high', water: 'high' },
-        [RvcCleanModeValue.MopHigh]: { key: 'max', fan: 'max', water: 'high' },
-      };
-      const mapping = modeMap[mode] || modeMap[RvcCleanModeValue.MopMin];
-      intensityKey = mapping.key;
-      defaultFan = mapping.fan;
-      defaultWater = mapping.water;
-    } else if (mode >= RvcCleanModeValue.VacuumMopQuiet && mode <= RvcCleanModeValue.VacuumMopTurbo) {
-      const offset = mode - RvcCleanModeValue.VacuumMopQuiet;
-      const offsetMap: Record<number, { key: 'auto' | 'quiet' | 'quick' | 'max'; fan: string; water: string }> = {
-        0: { key: 'quiet', fan: 'low', water: 'low' },
-        1: { key: 'auto', fan: 'medium', water: 'medium' },
-        2: { key: 'quick', fan: 'high', water: 'high' },
-        3: { key: 'max', fan: 'max', water: 'high' },
-        4: { key: 'max', fan: 'turbo', water: 'high' },
-      };
-      const mapping = offsetMap[offset] || offsetMap[1];
-      intensityKey = mapping.key;
-      defaultFan = mapping.fan;
-      defaultWater = mapping.water;
-    } else {
-      return { fan: 'medium', water: 'medium' };
-    }
-
-    const config = this.config as {
-      intensityPresets?: {
-        auto?: { fanSpeed?: string; waterUsage?: string };
-        quiet?: { fanSpeed?: string; waterUsage?: string };
-        quick?: { fanSpeed?: string; waterUsage?: string };
-        max?: { fanSpeed?: string; waterUsage?: string };
-      };
-    };
-
-    const overrides = config.intensityPresets?.[intensityKey];
-
-    return {
-      fan: overrides?.fanSpeed || defaultFan,
-      water: overrides?.waterUsage || defaultWater,
-    };
-  }
-  */
-
-  /**
    * Get friendly name for a consumable
    */
-  private getConsumableName(consumable: ValetudoConsumable): string {
+  private getConsumableName(consumable: ValetudoConsumable | ConsumableProperties): string {
     const typeMap: Record<string, string> = {
       'brush-main': 'Main Brush',
       'brush-side_right': 'Side Brush',
