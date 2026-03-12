@@ -109,12 +109,6 @@ If auto-discovery doesn't find your vacuum, add it manually:
     "enabled": true,
     "warningThreshold": 10,
     "exposeAsContactSensors": false,
-    "maxLifetimes": {
-      "mainBrush": 18000,
-      "sideBrush": 12000,
-      "dustFilter": 9000,
-      "sensor": 1800
-    }
   },
   "mapCache": {
     "enabled": true,
@@ -160,9 +154,20 @@ Apple Home requires **server mode** to be enabled. This creates a separate Matte
 
 The plugin exposes the following cleaning modes based on your vacuum's capabilities:
 
-- **Vacuum Only** - Quiet, Auto, Quick, Max intensities
-- **Mop Only** - Min, Low, Medium, High water levels
-- **Vacuum & Mop** - Combined modes with intensity variants
+- **Vacuum Only** 
+- **Mop Only** 
+- **Vacuum & Mop**
+- **Vacuum then Mop**
+
+### Presets
+By default the plugin maps Valetudo presets to Matter RVC modes using the following map:
+- `min` &rarr; Min
+- `low` &rarr; Quiet
+- `medium` &rarr; Auto
+- `high` &rarr; Quick
+- `max` &rarr; Max
+- `turbo` &rarr; DeepClean
+- `custom` &rarr; LowNoise
 
 ### Room Selection
 
