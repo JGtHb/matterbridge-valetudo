@@ -493,13 +493,19 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         vacuum_and_mop: new Map(),
         vacuum_then_mop: new Map(),
       };
+      const validOperationModes = new Set<string>(Object.keys(tagPresetMap));
+
       for (const opMode of operatingModes) {
+        if (!validOperationModes.has(opMode)) {
+          this.log.warn(`  Skipping unknown operation mode from API: "${opMode}"`);
+          continue;
+        }
         if (opMode === 'vacuum' && fanSpeedPresets) {
-          fanSpeedPresets.forEach((preset, _) => {
+          fanSpeedPresets.forEach((preset) => {
             tagPresetMap[opMode].set(defaultPresetToTagMap[preset], { fanSpeed: preset });
           });
         } else if (opMode === 'mop' && waterUsagePresets) {
-          waterUsagePresets.forEach((preset, _) => {
+          waterUsagePresets.forEach((preset) => {
             tagPresetMap[opMode].set(defaultPresetToTagMap[preset], { waterUsage: preset });
           });
         } else if ((opMode === 'vacuum_and_mop' || opMode === 'vacuum_then_mop') && fanSpeedPresets && waterUsagePresets) {
@@ -520,7 +526,15 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
           const selectedModes = tagGroup.operationModes || [];
           const mappings = tagGroup.mappings || [];
           for (const opMode of selectedModes) {
+            if (!validOperationModes.has(opMode)) {
+              this.log.warn(`  customTags: skipping unknown operation mode "${opMode}"`);
+              continue;
+            }
             for (const mapping of mappings) {
+              if (typeof mapping.matterModeTag !== 'number') {
+                this.log.warn(`  customTags: skipping mapping with invalid matterModeTag: ${JSON.stringify(mapping.matterModeTag)}`);
+                continue;
+              }
               tagPresetMap[opMode].set(mapping.matterModeTag, {
                 fanSpeed: mapping.fanSpeed,
                 waterUsage: mapping.waterUsage,
