@@ -32,7 +32,6 @@ interface VacuumInstance {
 
   // Per-vacuum state
   capabilities: string[];
-  operationModes: string[];
   modeMap: Map<number, { fanSpeed?: PresetLevel; waterUsage?: PresetLevel; operationMode?: ValetudoOperationMode }>;
   areaToSegmentMap: Map<number, { id: string; name: string }>;
   selectedSegmentIds: string[];
@@ -290,7 +289,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       device: null,
       pollingInterval: null,
       capabilities: [],
-      operationModes: [],
       areaToSegmentMap: new Map(),
       modeMap: new Map(),
       selectedSegmentIds: [],
@@ -849,7 +847,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       const name = this.getConsumableName(consumable);
       const matchingProperties = consumableProperties?.find((prop) => prop.type === consumable.type && prop.subType === consumable.subType);
       if (!matchingProperties) {
-        this.log.info(`No properties fround for consumable ${name}`);
+        this.log.info(`No properties found for consumable ${name}`);
         continue;
       }
       const remaining = consumable.remaining.value;
@@ -1174,7 +1172,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       cleaning: RvcOperationalState.OperationalState.Running,
       returning: RvcOperationalState.OperationalState.SeekingCharger,
       manual_control: RvcOperationalState.OperationalState.Running,
-      moving: RvcOperationalState.OperationalState.Docked,
+      moving: RvcOperationalState.OperationalState.Running,
       paused: RvcOperationalState.OperationalState.Paused,
       error: RvcOperationalState.OperationalState.Error,
       charging: RvcOperationalState.OperationalState.Charging,
