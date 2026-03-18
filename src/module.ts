@@ -29,6 +29,7 @@ interface VacuumInstance {
   client: ValetudoClient;
   device: RoboticVacuumCleaner | null;
   pollingInterval: NodeJS.Timeout | null;
+  initialPollTimeout: NodeJS.Timeout | null;
 
   // Per-vacuum state
   capabilities: string[];
@@ -134,6 +135,10 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
     // Stop polling for all vacuums
     for (const vacuum of this.vacuums.values()) {
+      if (vacuum.initialPollTimeout) {
+        clearTimeout(vacuum.initialPollTimeout);
+        vacuum.initialPollTimeout = null;
+      }
       if (vacuum.pollingInterval) {
         clearInterval(vacuum.pollingInterval);
         vacuum.pollingInterval = null;
@@ -288,6 +293,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       client,
       device: null,
       pollingInterval: null,
+      initialPollTimeout: null,
       capabilities: [],
       areaToSegmentMap: new Map(),
       modeMap: new Map(),
@@ -669,7 +675,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     const staggerOffset = vacuumIndex * 1000; // 1 second stagger per vacuum
     const totalDelay = MIN_INITIAL_DELAY + staggerOffset;
 
-    setTimeout(async () => {
+    vacuum.initialPollTimeout = setTimeout(async () => {
+      vacuum.initialPollTimeout = null;
+
       // Trigger immediate first poll when starting
       try {
         this.log.info(`[${vacuum.name}] Running initial state update...`);
@@ -855,7 +863,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       this.log.info(`  ${name}: ${remaining} ${consumable.remaining.unit}`);
 
       if (exposeAsContactSensors) {
-        const needsReplacement = remaining / matchingProperties.maxValue <= warningThreshold;
+        const needsReplacement = matchingProperties.maxValue <= 0 || remaining / matchingProperties.maxValue <= warningThreshold;
         // Create contact sensor for this consumable
         // Contact sensor: true (closed) = OK, false (open) = needs replacement
         const sensorName = `${vacuum.name} ${name}`;
@@ -1141,7 +1149,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
         const remaining = consumable.remaining.value;
         entry.consumable.remaining.value = remaining;
-        const needsReplacement = remaining / entry.properties.maxValue <= warningThreshold;
+        const needsReplacement = entry.properties.maxValue <= 0 || remaining / entry.properties.maxValue <= warningThreshold;
 
         // Log status change
         if (entry.lastState === undefined || entry.lastState !== needsReplacement) {
