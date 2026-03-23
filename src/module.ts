@@ -29,10 +29,10 @@ interface VacuumInstance {
   client: ValetudoClient;
   device: RoboticVacuumCleaner | null;
   pollingInterval: NodeJS.Timeout | null;
+  initialPollTimeout: NodeJS.Timeout | null;
 
   // Per-vacuum state
   capabilities: string[];
-  operationModes: string[];
   modeMap: Map<number, { fanSpeed?: PresetLevel; waterUsage?: PresetLevel; operationMode?: ValetudoOperationMode }>;
   areaToSegmentMap: Map<number, { id: string; name: string }>;
   selectedSegmentIds: string[];
@@ -103,9 +103,30 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   override async onStart(reason?: string) {
     this.log.info(`onStart called with reason: ${reason ?? 'none'}`);
 
+    this.checkDeprecatedConfig();
+
     await this.ready;
     await this.clearSelect();
     await this.discoverDevices();
+  }
+
+  /**
+   * Warn users about deprecated config keys from pre-v1.0.8 versions
+   */
+  private checkDeprecatedConfig(): void {
+    const config = this.config as Record<string, unknown>;
+
+    if (config.intensityPresets) {
+      this.log.warn('DEPRECATED: "intensityPresets" config is no longer supported and will be ignored.');
+      this.log.warn('  Use "customTags" instead to map fan speed / water usage presets to Matter mode tags.');
+      this.log.warn('  See README for the new configuration format.');
+    }
+
+    if (config.modeMapping) {
+      this.log.warn('DEPRECATED: "modeMapping" config is no longer supported and will be ignored.');
+      this.log.warn('  Use "customTags" instead to define per-operation-mode preset mappings.');
+      this.log.warn('  See README for the new configuration format.');
+    }
   }
 
   override async onConfigure() {
@@ -135,6 +156,10 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
     // Stop polling for all vacuums
     for (const vacuum of this.vacuums.values()) {
+      if (vacuum.initialPollTimeout) {
+        clearTimeout(vacuum.initialPollTimeout);
+        vacuum.initialPollTimeout = null;
+      }
       if (vacuum.pollingInterval) {
         clearInterval(vacuum.pollingInterval);
         vacuum.pollingInterval = null;
@@ -289,8 +314,8 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       client,
       device: null,
       pollingInterval: null,
+      initialPollTimeout: null,
       capabilities: [],
-      operationModes: [],
       areaToSegmentMap: new Map(),
       modeMap: new Map(),
       selectedSegmentIds: [],
@@ -493,13 +518,19 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         vacuum_and_mop: new Map(),
         vacuum_then_mop: new Map(),
       };
+      const validOperationModes = new Set<string>(Object.keys(tagPresetMap));
+
       for (const opMode of operatingModes) {
+        if (!validOperationModes.has(opMode)) {
+          this.log.warn(`  Skipping unknown operation mode from API: "${opMode}"`);
+          continue;
+        }
         if (opMode === 'vacuum' && fanSpeedPresets) {
-          fanSpeedPresets.forEach((preset, _) => {
+          fanSpeedPresets.forEach((preset) => {
             tagPresetMap[opMode].set(defaultPresetToTagMap[preset], { fanSpeed: preset });
           });
         } else if (opMode === 'mop' && waterUsagePresets) {
-          waterUsagePresets.forEach((preset, _) => {
+          waterUsagePresets.forEach((preset) => {
             tagPresetMap[opMode].set(defaultPresetToTagMap[preset], { waterUsage: preset });
           });
         } else if ((opMode === 'vacuum_and_mop' || opMode === 'vacuum_then_mop') && fanSpeedPresets && waterUsagePresets) {
@@ -520,7 +551,15 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
           const selectedModes = tagGroup.operationModes || [];
           const mappings = tagGroup.mappings || [];
           for (const opMode of selectedModes) {
+            if (!validOperationModes.has(opMode)) {
+              this.log.warn(`  customTags: skipping unknown operation mode "${opMode}"`);
+              continue;
+            }
             for (const mapping of mappings) {
+              if (typeof mapping.matterModeTag !== 'number') {
+                this.log.warn(`  customTags: skipping mapping with invalid matterModeTag: ${JSON.stringify(mapping.matterModeTag)}`);
+                continue;
+              }
               tagPresetMap[opMode].set(mapping.matterModeTag, {
                 fanSpeed: mapping.fanSpeed,
                 waterUsage: mapping.waterUsage,
@@ -657,7 +696,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     const staggerOffset = vacuumIndex * 1000; // 1 second stagger per vacuum
     const totalDelay = MIN_INITIAL_DELAY + staggerOffset;
 
-    setTimeout(async () => {
+    vacuum.initialPollTimeout = setTimeout(async () => {
+      vacuum.initialPollTimeout = null;
+
       // Trigger immediate first poll when starting
       try {
         this.log.info(`[${vacuum.name}] Running initial state update...`);
@@ -806,6 +847,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         enabled?: boolean;
         exposeAsContactSensors?: boolean;
         warningThreshold?: number;
+        maxLifetimes?: Record<string, number>;
       };
     };
 
@@ -829,21 +871,27 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     const exposeAsContactSensors = config.consumables?.exposeAsContactSensors === true;
 
     const warningThreshold = (config.consumables?.warningThreshold ?? 10) / 100;
+    const maxLifetimes = config.consumables?.maxLifetimes;
     const consumableProperties = await vacuum.client.getConsumablesProperties();
 
     for (const consumable of consumables) {
       const name = this.getConsumableName(consumable);
       const matchingProperties = consumableProperties?.find((prop) => prop.type === consumable.type && prop.subType === consumable.subType);
       if (!matchingProperties) {
-        this.log.info(`No properties fround for consumable ${name}`);
+        this.log.info(`No properties found for consumable ${name}`);
         continue;
+      }
+      const effectiveMaxValue = this.getConsumableMaxValue(consumable, matchingProperties.maxValue, maxLifetimes);
+      if (effectiveMaxValue !== matchingProperties.maxValue) {
+        this.log.info(`  ${name}: using configured maxLifetime (${effectiveMaxValue}) instead of API value (${matchingProperties.maxValue})`);
+        matchingProperties.maxValue = effectiveMaxValue;
       }
       const remaining = consumable.remaining.value;
 
       this.log.info(`  ${name}: ${remaining} ${consumable.remaining.unit}`);
 
       if (exposeAsContactSensors) {
-        const needsReplacement = remaining / matchingProperties.maxValue <= warningThreshold;
+        const needsReplacement = matchingProperties.maxValue <= 0 || remaining / matchingProperties.maxValue <= warningThreshold;
         // Create contact sensor for this consumable
         // Contact sensor: true (closed) = OK, false (open) = needs replacement
         const sensorName = `${vacuum.name} ${name}`;
@@ -1129,7 +1177,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
         const remaining = consumable.remaining.value;
         entry.consumable.remaining.value = remaining;
-        const needsReplacement = remaining / entry.properties.maxValue <= warningThreshold;
+        const needsReplacement = entry.properties.maxValue <= 0 || remaining / entry.properties.maxValue <= warningThreshold;
 
         // Log status change
         if (entry.lastState === undefined || entry.lastState !== needsReplacement) {
@@ -1160,7 +1208,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       cleaning: RvcOperationalState.OperationalState.Running,
       returning: RvcOperationalState.OperationalState.SeekingCharger,
       manual_control: RvcOperationalState.OperationalState.Running,
-      moving: RvcOperationalState.OperationalState.Docked,
+      moving: RvcOperationalState.OperationalState.Running,
       paused: RvcOperationalState.OperationalState.Paused,
       error: RvcOperationalState.OperationalState.Error,
       charging: RvcOperationalState.OperationalState.Charging,
@@ -1212,6 +1260,28 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     }
 
     return typeMap[key] || `${consumable.type} ${consumable.subType}`;
+  }
+
+  /**
+   * Resolve the effective maxValue for a consumable, applying user overrides from maxLifetimes config
+   */
+  private getConsumableMaxValue(consumable: { type: string; subType: string }, apiMaxValue: number, maxLifetimes?: Record<string, number>): number {
+    if (!maxLifetimes) return apiMaxValue;
+
+    // Map consumable type+subType to config key
+    const configKeyMap: Record<string, string> = {
+      'brush-main': 'mainBrush',
+      'brush-side_right': 'sideBrush',
+      'brush-side_left': 'sideBrush',
+      'filter-main': 'dustFilter',
+      'cleaning-sensor': 'sensor',
+      'mop-main': 'mop',
+    };
+    const configKey = configKeyMap[`${consumable.type}-${consumable.subType}`];
+    if (configKey && maxLifetimes[configKey] !== undefined) {
+      return maxLifetimes[configKey];
+    }
+    return apiMaxValue;
   }
 
   /**
