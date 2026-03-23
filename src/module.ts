@@ -1265,11 +1265,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   /**
    * Resolve the effective maxValue for a consumable, applying user overrides from maxLifetimes config
    */
-  private getConsumableMaxValue(
-    consumable: { type: string; subType: string },
-    apiMaxValue: number,
-    maxLifetimes?: Record<string, number>,
-  ): number {
+  private getConsumableMaxValue(consumable: { type: string; subType: string }, apiMaxValue: number, maxLifetimes?: Record<string, number>): number {
     if (!maxLifetimes) return apiMaxValue;
 
     // Map consumable type+subType to config key
