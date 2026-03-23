@@ -135,6 +135,43 @@
           "description": "Create contact sensors for each consumable (open = needs replacement, closed = OK)",
           "type": "boolean",
           "default": false
+        },
+        "maxLifetimes": {
+          "title": "Maximum Lifetimes (minutes)",
+          "description": "Override API-reported max lifetime for consumable types. If not set, the value reported by the vacuum is used.",
+          "type": "object",
+          "properties": {
+            "mainBrush": {
+              "title": "Main Brush",
+              "description": "Default: use API value",
+              "type": "number",
+              "minimum": 60
+            },
+            "sideBrush": {
+              "title": "Side Brush",
+              "description": "Default: use API value",
+              "type": "number",
+              "minimum": 60
+            },
+            "dustFilter": {
+              "title": "Dust Filter",
+              "description": "Default: use API value",
+              "type": "number",
+              "minimum": 60
+            },
+            "sensor": {
+              "title": "Sensor Cleaning",
+              "description": "Default: use API value",
+              "type": "number",
+              "minimum": 60
+            },
+            "mop": {
+              "title": "Mop",
+              "description": "Default: use API value",
+              "type": "number",
+              "minimum": 60
+            }
+          }
         }
       }
     },

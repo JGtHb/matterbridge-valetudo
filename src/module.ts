@@ -103,9 +103,30 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   override async onStart(reason?: string) {
     this.log.info(`onStart called with reason: ${reason ?? 'none'}`);
 
+    this.checkDeprecatedConfig();
+
     await this.ready;
     await this.clearSelect();
     await this.discoverDevices();
+  }
+
+  /**
+   * Warn users about deprecated config keys from pre-v1.0.8 versions
+   */
+  private checkDeprecatedConfig(): void {
+    const config = this.config as Record<string, unknown>;
+
+    if (config.intensityPresets) {
+      this.log.warn('DEPRECATED: "intensityPresets" config is no longer supported and will be ignored.');
+      this.log.warn('  Use "customTags" instead to map fan speed / water usage presets to Matter mode tags.');
+      this.log.warn('  See README for the new configuration format.');
+    }
+
+    if (config.modeMapping) {
+      this.log.warn('DEPRECATED: "modeMapping" config is no longer supported and will be ignored.');
+      this.log.warn('  Use "customTags" instead to define per-operation-mode preset mappings.');
+      this.log.warn('  See README for the new configuration format.');
+    }
   }
 
   override async onConfigure() {
@@ -826,6 +847,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         enabled?: boolean;
         exposeAsContactSensors?: boolean;
         warningThreshold?: number;
+        maxLifetimes?: Record<string, number>;
       };
     };
 
@@ -849,6 +871,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     const exposeAsContactSensors = config.consumables?.exposeAsContactSensors === true;
 
     const warningThreshold = (config.consumables?.warningThreshold ?? 10) / 100;
+    const maxLifetimes = config.consumables?.maxLifetimes;
     const consumableProperties = await vacuum.client.getConsumablesProperties();
 
     for (const consumable of consumables) {
@@ -857,6 +880,11 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       if (!matchingProperties) {
         this.log.info(`No properties found for consumable ${name}`);
         continue;
+      }
+      const effectiveMaxValue = this.getConsumableMaxValue(consumable, matchingProperties.maxValue, maxLifetimes);
+      if (effectiveMaxValue !== matchingProperties.maxValue) {
+        this.log.info(`  ${name}: using configured maxLifetime (${effectiveMaxValue}) instead of API value (${matchingProperties.maxValue})`);
+        matchingProperties.maxValue = effectiveMaxValue;
       }
       const remaining = consumable.remaining.value;
 
@@ -1232,6 +1260,32 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     }
 
     return typeMap[key] || `${consumable.type} ${consumable.subType}`;
+  }
+
+  /**
+   * Resolve the effective maxValue for a consumable, applying user overrides from maxLifetimes config
+   */
+  private getConsumableMaxValue(
+    consumable: { type: string; subType: string },
+    apiMaxValue: number,
+    maxLifetimes?: Record<string, number>,
+  ): number {
+    if (!maxLifetimes) return apiMaxValue;
+
+    // Map consumable type+subType to config key
+    const configKeyMap: Record<string, string> = {
+      'brush-main': 'mainBrush',
+      'brush-side_right': 'sideBrush',
+      'brush-side_left': 'sideBrush',
+      'filter-main': 'dustFilter',
+      'cleaning-sensor': 'sensor',
+      'mop-main': 'mop',
+    };
+    const configKey = configKeyMap[`${consumable.type}-${consumable.subType}`];
+    if (configKey && maxLifetimes[configKey] !== undefined) {
+      return maxLifetimes[configKey];
+    }
+    return apiMaxValue;
   }
 
   /**
