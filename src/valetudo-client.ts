@@ -5,8 +5,10 @@
  * @description Client for communicating with Valetudo REST API
  */
 
+import EventEmitter from 'node:events';
 import * as http from 'node:http';
 
+import { ErrorEvent, EventSource } from 'eventsource';
 import { AnsiLogger } from 'matterbridge/logger';
 
 // ============================================================================
@@ -188,16 +190,26 @@ export interface MapPositionData {
   metaData?: { version: number };
 }
 
+export interface ValetudoClientEvents {
+  StateAttributesUpdated: (attributes: StateAttribute[]) => void;
+  MapUpdated: (mapData: MapData) => void;
+  ConsumablesUpdated: (consumables: ValetudoConsumable[]) => void;
+}
+
 // ============================================================================
 // Valetudo Client
 // ============================================================================
 
-export class ValetudoClient {
+export class ValetudoClient extends EventEmitter {
   private baseUrl: string;
   private log: AnsiLogger;
   private authHeader: string | null = null;
+  private attributesEvents: EventSource | null = null;
+  private mapEvents: EventSource | null = null;
+  private consumablesInterval: NodeJS.Timeout | null = null;
 
   constructor(ip: string, log: AnsiLogger, username?: string, password?: string) {
+    super();
     this.baseUrl = `http://${ip}`;
     this.log = log;
 
@@ -205,6 +217,60 @@ export class ValetudoClient {
     if (username && password) {
       this.authHeader = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
     }
+  }
+  override emit<K extends keyof ValetudoClientEvents>(eventName: K, ...args: Parameters<ValetudoClientEvents[K]>): boolean {
+    return super.emit(eventName, ...args);
+  }
+  override on<K extends keyof ValetudoClientEvents>(eventName: K, listener: ValetudoClientEvents[K]): this {
+    return super.on(eventName, listener);
+  }
+
+  async connect(consumableTracking: boolean = false): Promise<void> {
+    if (this.attributesEvents || this.mapEvents) {
+      this.log.debug('SSE already connected');
+      return;
+    }
+
+    this.attributesEvents = new EventSource(`${this.baseUrl}/api/v2/robot/state/attributes/sse`);
+    this.mapEvents = new EventSource(`${this.baseUrl}/api/v2/robot/state/map/sse`);
+
+    this.attributesEvents.addEventListener('StateAttributesUpdated', (e: MessageEvent) => {
+      this.emit('StateAttributesUpdated', JSON.parse(e.data) as StateAttribute[]);
+      this.log.debug(`attributes events: ${e.data}`);
+    });
+
+    this.mapEvents.addEventListener('MapUpdated', (e: MessageEvent) => {
+      this.emit('MapUpdated', JSON.parse(e.data) as MapData);
+      this.log.debug(`map events: ${e.data}`);
+    });
+
+    this.attributesEvents.addEventListener('error', (e: ErrorEvent) => {
+      this.log.debug(`attributes SSE error: ${JSON.stringify(e)}`);
+    });
+
+    this.mapEvents.addEventListener('error', (e: ErrorEvent) => {
+      this.log.debug(`map SSE error: ${JSON.stringify(e)}`);
+    });
+
+    if (consumableTracking) {
+      this.consumablesInterval = setInterval(
+        async () => {
+          const consumables = await this.getConsumables();
+          if (!consumables) return;
+          this.emit('ConsumablesUpdated', consumables);
+        },
+        5 * 60 * 1000,
+      );
+    }
+  }
+
+  async disconnect(): Promise<void> {
+    this.attributesEvents?.close();
+    this.mapEvents?.close();
+    this.attributesEvents = null;
+    this.mapEvents = null;
+    if (this.consumablesInterval) clearInterval(this.consumablesInterval);
+    this.consumablesInterval = null;
   }
 
   // ==========================================================================

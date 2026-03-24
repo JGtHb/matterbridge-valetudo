@@ -7,7 +7,7 @@
  * @license Apache-2.0
  */
 
-import { MatterbridgeDynamicPlatform, PlatformConfig, MatterbridgeEndpoint, contactSensor } from 'matterbridge';
+import { MatterbridgeDynamicPlatform, MatterbridgeEndpoint, PlatformConfig, contactSensor } from 'matterbridge';
 import { RoboticVacuumCleaner } from 'matterbridge/devices';
 import { AnsiLogger, LogLevel } from 'matterbridge/logger';
 import { RvcCleanMode, RvcOperationalState, RvcRunMode } from 'matterbridge/matter/clusters';
@@ -16,7 +16,18 @@ import { RvcCleanMode, RvcOperationalState, RvcRunMode } from 'matterbridge/matt
 // import resolution issues across different npm dependency tree layouts.
 type PlatformMatterbridge = ConstructorParameters<typeof MatterbridgeDynamicPlatform>[0];
 
-import { BatteryStateAttribute, CachedMapLayers, ConsumableProperties, PresetLevel, ValetudoClient, ValetudoConsumable, ValetudoOperationMode } from './valetudo-client.js';
+import {
+  BatteryStateAttribute,
+  CachedMapLayers,
+  ConsumableProperties,
+  MapData,
+  MapPositionData,
+  PresetLevel,
+  StateAttribute,
+  ValetudoClient,
+  ValetudoConsumable,
+  ValetudoOperationMode,
+} from './valetudo-client.js';
 import { ValetudoDiscovery } from './valetudo-discovery.js';
 
 /**
@@ -139,6 +150,8 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         clearInterval(vacuum.pollingInterval);
         vacuum.pollingInterval = null;
       }
+      vacuum.client.disconnect();
+      vacuum.client.removeAllListeners();
     }
 
     // Clear vacuum map
@@ -336,8 +349,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       // Create Matter device for this vacuum
       await this.createDeviceForVacuum(vacuum);
 
-      // Start polling for this vacuum
-      this.startPollingForVacuum(vacuum);
+      const consumableTracking = vacuum.consumableMap.size > 0;
+      await vacuum.client.connect(consumableTracking);
+      await this.setupListeners(vacuum);
 
       this.log.info(`Successfully initialized vacuum: ${vacuum.name}`);
     } catch (error) {
@@ -643,44 +657,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   }
 
   /**
-   * Start polling for a specific vacuum
-   */
-  private startPollingForVacuum(vacuum: VacuumInstance): void {
-    const config = this.config as { pollingInterval?: number };
-    const baseInterval = Math.max(5000, Math.min(60000, config.pollingInterval || 30000));
-
-    // Add minimum 10 second delay before first poll to allow subscription to stabilize
-    const MIN_INITIAL_DELAY = 10000;
-
-    // Stagger polling intervals to avoid concurrent request spikes
-    const vacuumIndex = Array.from(this.vacuums.keys()).indexOf(vacuum.id);
-    const staggerOffset = vacuumIndex * 1000; // 1 second stagger per vacuum
-    const totalDelay = MIN_INITIAL_DELAY + staggerOffset;
-
-    setTimeout(async () => {
-      // Trigger immediate first poll when starting
-      try {
-        this.log.info(`[${vacuum.name}] Running initial state update...`);
-        await this.updateVacuumState(vacuum);
-      } catch (error) {
-        this.log.error(`[${vacuum.name}] Error in initial poll: ${error instanceof Error ? error.message : String(error)}`);
-      }
-
-      // Then start the regular polling interval
-      vacuum.pollingInterval = setInterval(async () => {
-        try {
-          await this.updateVacuumState(vacuum);
-        } catch (error) {
-          this.log.error(`Error polling vacuum ${vacuum.name}: ${error instanceof Error ? error.message : String(error)}`);
-          vacuum.online = false;
-        }
-      }, baseInterval);
-
-      this.log.info(`Started polling for ${vacuum.name} (${baseInterval}ms interval, ${totalDelay}ms initial delay)`);
-    }, totalDelay);
-  }
-
-  /**
    * Set up command handlers for a specific vacuum
    */
   private setupCommandHandlersForVacuum(vacuum: VacuumInstance): void {
@@ -923,20 +899,14 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   }
 
   /**
-   * Update state for a specific vacuum
+   * Setup state events listeners and update state for a specific vacuum
    */
-  private async updateVacuumState(vacuum: VacuumInstance): Promise<void> {
-    if (!vacuum.device) return;
+  private async setupListeners(vacuum: VacuumInstance): Promise<void> {
+    vacuum.client.on('StateAttributesUpdated', async (attributes: StateAttribute[]) => {
+      if (!vacuum.device) return;
+      vacuum.lastSeen = Date.now();
+      vacuum.online = true;
 
-    try {
-      // Get state attributes (single call for battery, status, dock status, etc.)
-      const attributes = await vacuum.client.getStateAttributes();
-      if (!attributes) {
-        this.log.warn(`[${vacuum.name}] Failed to fetch state attributes`);
-        return;
-      }
-
-      // Update battery state
       const battery = attributes.find((attr) => attr.__class === 'BatteryStateAttribute') as BatteryStateAttribute | undefined;
       if (battery) {
         const batPercentRemaining = Math.round(battery.level * 2);
@@ -1006,24 +976,30 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         vacuum.initialStatePending = false;
         this.log.debug(`[${vacuum.name}] Initial state set successfully`);
       }
+    });
 
-      // Small delay before next API call to avoid overwhelming vacuum's HTTP server
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
+    vacuum.client.on('MapUpdated', async (mapData: MapData) => {
+      if (!vacuum.device) return;
+      vacuum.lastSeen = Date.now();
+      vacuum.online = true;
       // Position tracking with cached map layers
       const config = this.config as { positionTracking?: { enabled?: boolean } };
       if (config.positionTracking?.enabled !== false && vacuum.areaToSegmentMap.size > 0) {
         try {
           // Initialize or refresh cache if needed
           if (!vacuum.mapLayersCache || Date.now() > vacuum.mapCacheValidUntil) {
-            await this.refreshMapCacheForVacuum(vacuum);
+            const config = this.config as { mapCache?: { refreshIntervalHours?: number } };
+            const refreshHours = Math.max(0.1, Math.min(24, config.mapCache?.refreshIntervalHours ?? 1));
+            vacuum.mapLayersCache = vacuum.client.createCachedLayers(mapData);
+            vacuum.mapCacheValidUntil = Date.now() + refreshHours * 60 * 60 * 1000;
+            this.log.debug(`[${vacuum.name}] Map cache refreshed`);
           }
 
           // Skip position tracking if cache still not available
           if (!vacuum.mapLayersCache) {
             this.log.debug(`[${vacuum.name}] Map cache not available, skipping position tracking`);
           } else {
-            const positionData = await vacuum.client.getMapPositionData();
+            const positionData = mapData as MapPositionData;
             if (positionData) {
               // Check map version
               if (positionData.metaData?.version !== undefined && positionData.metaData.version !== vacuum.mapLayersCache.version) {
@@ -1064,18 +1040,49 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
           this.log.debug(`[${vacuum.name}] Position tracking error: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
+    });
 
-      // Update consumables if enabled
-      if (vacuum.consumableMap.size > 0) {
-        await this.updateConsumableStatesForVacuum(vacuum);
+    vacuum.client.on('ConsumablesUpdated', async (consumables: ValetudoConsumable[]) => {
+      const config = this.config as {
+        consumables?: {
+          warningThreshold?: number;
+        };
+      };
+
+      const warningThreshold = (config.consumables?.warningThreshold || 10) / 100;
+
+      try {
+        for (const consumable of consumables) {
+          const name = this.getConsumableName(consumable);
+          const entry = vacuum.consumableMap.get(name);
+
+          if (!entry) continue;
+          if (!entry.properties) {
+            this.log.warn(`No properties found for consumable ${entry.consumable.type}-${entry.consumable.subType}`);
+            continue;
+          }
+
+          const remaining = consumable.remaining.value;
+          entry.consumable.remaining.value = remaining;
+          const needsReplacement = remaining / entry.properties.maxValue <= warningThreshold;
+
+          // Log status change
+          if (entry.lastState === undefined || entry.lastState !== needsReplacement) {
+            const status = needsReplacement ? '⚠️ NEEDS REPLACEMENT' : '✓ OK';
+            this.log.info(`[${vacuum.name}] ${name}: ${remaining} ${consumable.remaining.unit} - ${status}`);
+            entry.lastState = needsReplacement;
+          }
+
+          // Update contact sensor if it exists
+          if (entry.endpoint) {
+            await entry.endpoint.setAttribute('BooleanState', 'stateValue', !needsReplacement, this.log);
+          }
+        }
+      } catch (error) {
+        this.log.debug(`[${vacuum.name}] Error updating consumables: ${error instanceof Error ? error.message : String(error)}`);
       }
-
-      vacuum.lastSeen = Date.now();
-      vacuum.online = true;
-    } catch (error) {
-      this.log.error(`[${vacuum.name}] Error updating state: ${error instanceof Error ? error.message : String(error)}`);
-      vacuum.online = false;
-    }
+    });
+    return;
   }
 
   /**
@@ -1090,61 +1097,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       vacuum.mapLayersCache = vacuum.client.createCachedLayers(mapData);
       vacuum.mapCacheValidUntil = Date.now() + refreshHours * 60 * 60 * 1000;
       this.log.debug(`[${vacuum.name}] Map cache refreshed`);
-    }
-  }
-
-  /**
-   * Update consumable states for a specific vacuum
-   */
-  private async updateConsumableStatesForVacuum(vacuum: VacuumInstance): Promise<void> {
-    // Only check consumables every 5 minutes to reduce API load
-    const CONSUMABLES_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
-    const now = Date.now();
-
-    if (now - vacuum.lastConsumablesCheck < CONSUMABLES_CHECK_INTERVAL) {
-      return; // Skip this check
-    }
-
-    vacuum.lastConsumablesCheck = now;
-
-    const config = this.config as {
-      consumables?: {
-        warningThreshold?: number;
-      };
-    };
-
-    const warningThreshold = (config.consumables?.warningThreshold || 10) / 100;
-
-    try {
-      const consumables = await vacuum.client.getConsumables();
-      if (!consumables) return;
-      const consumableProperties = await vacuum.client.getConsumablesProperties();
-      if (!consumableProperties) return;
-
-      for (const consumable of consumables) {
-        const name = this.getConsumableName(consumable);
-        const entry = vacuum.consumableMap.get(name);
-
-        if (!entry) continue;
-
-        const remaining = consumable.remaining.value;
-        entry.consumable.remaining.value = remaining;
-        const needsReplacement = remaining / entry.properties.maxValue <= warningThreshold;
-
-        // Log status change
-        if (entry.lastState === undefined || entry.lastState !== needsReplacement) {
-          const status = needsReplacement ? '⚠️ NEEDS REPLACEMENT' : '✓ OK';
-          this.log.info(`[${vacuum.name}] ${name}: ${remaining} ${consumable.remaining.unit} - ${status}`);
-          entry.lastState = needsReplacement;
-        }
-
-        // Update contact sensor if it exists
-        if (entry.endpoint) {
-          await entry.endpoint.setAttribute('BooleanState', 'stateValue', !needsReplacement, this.log);
-        }
-      }
-    } catch (error) {
-      this.log.debug(`[${vacuum.name}] Error updating consumables: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
