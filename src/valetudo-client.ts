@@ -5,11 +5,11 @@
  * @description Client for communicating with Valetudo REST API
  */
 
-import EventEmitter from 'node:events';
 import * as http from 'node:http';
 
-import { ErrorEvent, EventSource } from 'eventsource';
+import { EventSource } from 'eventsource';
 import { AnsiLogger } from 'matterbridge/logger';
+import { Observable } from 'rxjs';
 
 // ============================================================================
 // Type Definitions
@@ -190,17 +190,11 @@ export interface MapPositionData {
   metaData?: { version: number };
 }
 
-export interface ValetudoClientEvents {
-  StateAttributesUpdated: (attributes: StateAttribute[]) => void;
-  MapUpdated: (mapData: MapData) => void;
-  ConsumablesUpdated: (consumables: ValetudoConsumable[]) => void;
-}
-
 // ============================================================================
 // Valetudo Client
 // ============================================================================
 
-export class ValetudoClient extends EventEmitter {
+export class ValetudoClient {
   private baseUrl: string;
   private log: AnsiLogger;
   private authHeader: string | null = null;
@@ -209,7 +203,6 @@ export class ValetudoClient extends EventEmitter {
   private consumablesInterval: NodeJS.Timeout | null = null;
 
   constructor(ip: string, log: AnsiLogger, username?: string, password?: string) {
-    super();
     this.baseUrl = `http://${ip}`;
     this.log = log;
 
@@ -217,60 +210,6 @@ export class ValetudoClient extends EventEmitter {
     if (username && password) {
       this.authHeader = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
     }
-  }
-  override emit<K extends keyof ValetudoClientEvents>(eventName: K, ...args: Parameters<ValetudoClientEvents[K]>): boolean {
-    return super.emit(eventName, ...args);
-  }
-  override on<K extends keyof ValetudoClientEvents>(eventName: K, listener: ValetudoClientEvents[K]): this {
-    return super.on(eventName, listener);
-  }
-
-  async connect(consumableTracking: boolean = false): Promise<void> {
-    if (this.attributesEvents || this.mapEvents) {
-      this.log.debug('SSE already connected');
-      return;
-    }
-
-    this.attributesEvents = new EventSource(`${this.baseUrl}/api/v2/robot/state/attributes/sse`);
-    this.mapEvents = new EventSource(`${this.baseUrl}/api/v2/robot/state/map/sse`);
-
-    this.attributesEvents.addEventListener('StateAttributesUpdated', (e: MessageEvent) => {
-      this.emit('StateAttributesUpdated', JSON.parse(e.data) as StateAttribute[]);
-      this.log.debug(`attributes events: ${e.data}`);
-    });
-
-    this.mapEvents.addEventListener('MapUpdated', (e: MessageEvent) => {
-      this.emit('MapUpdated', JSON.parse(e.data) as MapData);
-      this.log.debug(`map events: ${e.data}`);
-    });
-
-    this.attributesEvents.addEventListener('error', (e: ErrorEvent) => {
-      this.log.debug(`attributes SSE error: ${JSON.stringify(e)}`);
-    });
-
-    this.mapEvents.addEventListener('error', (e: ErrorEvent) => {
-      this.log.debug(`map SSE error: ${JSON.stringify(e)}`);
-    });
-
-    if (consumableTracking) {
-      this.consumablesInterval = setInterval(
-        async () => {
-          const consumables = await this.getConsumables();
-          if (!consumables) return;
-          this.emit('ConsumablesUpdated', consumables);
-        },
-        5 * 60 * 1000,
-      );
-    }
-  }
-
-  async disconnect(): Promise<void> {
-    this.attributesEvents?.close();
-    this.mapEvents?.close();
-    this.attributesEvents = null;
-    this.mapEvents = null;
-    if (this.consumablesInterval) clearInterval(this.consumablesInterval);
-    this.consumablesInterval = null;
   }
 
   // ==========================================================================
@@ -347,6 +286,42 @@ export class ValetudoClient extends EventEmitter {
       this.log.error(`Error fetching state attributes: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
+  }
+
+  getStateAttributesObservable(): Observable<StateAttribute[]> {
+    let eventSource: EventSource | null = null;
+    return new Observable<StateAttribute[]>((subscriber) => {
+      this.getStateAttributes()
+        .then((data) => {
+          if (subscriber.closed) return;
+
+          if (data) subscriber.next(data);
+
+          eventSource = new EventSource(`${this.baseUrl}/api/v2/robot/state/attributes/sse`);
+          eventSource.addEventListener('StateAttributesUpdated', (e: MessageEvent) => {
+            if (subscriber.closed) return;
+            try {
+              this.log.debug('Received StateAttributesUpdated event');
+              subscriber.next(JSON.parse(e.data) as StateAttribute[]);
+            } catch (error) {
+              this.log.error(`Failed to parse attributes SSE data: ${error}`);
+            }
+          });
+          return;
+        })
+        .catch((error) => {
+          this.log.error(`Error fetching attributes: ${error instanceof Error ? error.message : String(error)}`);
+          if (!subscriber.closed) subscriber.error(error);
+        });
+
+      return () => {
+        if (eventSource) {
+          this.log.debug('Closing attributes SSE connection');
+          eventSource.close();
+          eventSource = null;
+        }
+      };
+    });
   }
 
   // ==========================================================================
@@ -591,6 +566,43 @@ export class ValetudoClient extends EventEmitter {
     }
   }
 
+  getMapDataObservable(): Observable<MapData> {
+    const url = `${this.baseUrl}/api/v2/robot/state/map`;
+    let eventSource: EventSource | null = null;
+    return new Observable<MapData>((subscriber) => {
+      this.getMapDataWithTimeout(10000)
+        .then((data) => {
+          if (subscriber.closed) return;
+
+          if (data) subscriber.next(data);
+
+          eventSource = new EventSource(`${url}/sse`);
+          eventSource.addEventListener('MapUpdated', (e: MessageEvent) => {
+            if (subscriber.closed) return;
+            try {
+              this.log.debug('Received MapUpdated event');
+              subscriber.next(JSON.parse(e.data) as MapData);
+            } catch (error) {
+              this.log.error(`Failed to parse map SSE data: ${error}`);
+            }
+          });
+          return;
+        })
+        .catch((error) => {
+          this.log.error(`Error fetching map data: ${error instanceof Error ? error.message : String(error)}`);
+          if (!subscriber.closed) subscriber.error(error);
+        });
+
+      return () => {
+        if (eventSource) {
+          this.log.debug('Closing map SSE connection');
+          eventSource.close();
+          eventSource = null;
+        }
+      };
+    });
+  }
+
   /**
    * Get only position data from map (still calls full endpoint but extracts only entities)
    * In the future, this could be optimized if Valetudo adds a position-only endpoint
@@ -701,6 +713,37 @@ export class ValetudoClient extends EventEmitter {
       this.log.error(`Error fetching consumables: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
+  }
+
+  getConsumablesObservable(interval: number = 5 * 60 * 1000): Observable<ValetudoConsumable[]> {
+    let consumablesInterval: NodeJS.Timeout | null = null;
+    return new Observable<ValetudoConsumable[]>((subscriber) => {
+      this.getConsumables()
+        .then((data) => {
+          if (subscriber.closed) return;
+
+          if (data) subscriber.next(data);
+
+          consumablesInterval = setInterval(async () => {
+            const consumables = await this.getConsumables();
+            if (!consumables) return;
+            subscriber.next(consumables);
+          }, interval);
+          return;
+        })
+        .catch((error) => {
+          this.log.error(`Error fetching consumable data: ${error instanceof Error ? error.message : String(error)}`);
+          if (!subscriber.closed) subscriber.error(error);
+        });
+
+      return () => {
+        if (consumablesInterval) {
+          this.log.debug('Clearing consumables interval');
+          clearInterval(consumablesInterval);
+          consumablesInterval = null;
+        }
+      };
+    });
   }
 
   /**

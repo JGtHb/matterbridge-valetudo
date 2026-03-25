@@ -11,6 +11,7 @@ import { MatterbridgeDynamicPlatform, MatterbridgeEndpoint, PlatformConfig, cont
 import { RoboticVacuumCleaner } from 'matterbridge/devices';
 import { AnsiLogger, LogLevel } from 'matterbridge/logger';
 import { RvcCleanMode, RvcOperationalState, RvcRunMode } from 'matterbridge/matter/clusters';
+import { Subscription } from 'rxjs';
 
 // Derive PlatformMatterbridge type from the parent class constructor to avoid
 // import resolution issues across different npm dependency tree layouts.
@@ -39,7 +40,7 @@ interface VacuumInstance {
   name: string;
   client: ValetudoClient;
   device: RoboticVacuumCleaner | null;
-  pollingInterval: NodeJS.Timeout | null;
+  subscriptions: Subscription;
 
   // Per-vacuum state
   capabilities: string[];
@@ -144,14 +145,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       this.mdns = null;
     }
 
-    // Stop polling for all vacuums
+    // Unsubsribe from events for all vacuums
     for (const vacuum of this.vacuums.values()) {
-      if (vacuum.pollingInterval) {
-        clearInterval(vacuum.pollingInterval);
-        vacuum.pollingInterval = null;
-      }
-      vacuum.client.disconnect();
-      vacuum.client.removeAllListeners();
+      vacuum.subscriptions.unsubscribe();
     }
 
     // Clear vacuum map
@@ -301,7 +297,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       name: deviceName,
       client,
       device: null,
-      pollingInterval: null,
+      subscriptions: new Subscription(),
       capabilities: [],
       operationModes: [],
       areaToSegmentMap: new Map(),
@@ -349,9 +345,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       // Create Matter device for this vacuum
       await this.createDeviceForVacuum(vacuum);
 
-      const consumableTracking = vacuum.consumableMap.size > 0;
-      await vacuum.client.connect(consumableTracking);
-      await this.setupListeners(vacuum);
+      await this.setupSubscriptions(vacuum);
 
       this.log.info(`Successfully initialized vacuum: ${vacuum.name}`);
     } catch (error) {
@@ -646,9 +640,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         this.log.warn(`  No supportedAreas to set! supportedAreas is ${supportedAreas ? 'empty array' : 'undefined'}`);
       }
 
-      // Set initial state AFTER registering and setting areas
-      await this.setInitialVacuumState(vacuum);
-
       // Set up consumables for this vacuum
       await this.setupConsumablesForVacuum(vacuum);
     } catch (error) {
@@ -842,257 +833,210 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   }
 
   /**
-   * Set initial state for a vacuum before device registration
-   * This is critical for Apple Home to avoid "updating" status
+   * Setup subsriptions and update state for a specific vacuum
    */
-  private async setInitialVacuumState(vacuum: VacuumInstance): Promise<void> {
-    if (!vacuum.device) return;
+  private async setupSubscriptions(vacuum: VacuumInstance): Promise<void> {
+    const config = this.config as {
+      mapCache?: { refreshIntervalHours?: number };
+      positionTracking?: { enabled?: boolean };
+      consumables?: {
+        warningThreshold?: number;
+      };
+    };
 
-    try {
-      // Get initial state attributes
-      const attributes = await vacuum.client.getStateAttributes();
-      if (!attributes) {
-        this.log.warn(`[${vacuum.name}] Failed to fetch initial state attributes`);
-        return;
-      }
+    vacuum.subscriptions.add(
+      vacuum.client.getStateAttributesObservable().subscribe({
+        next: async (attributes: StateAttribute[]) => {
+          if (!vacuum.device) return;
+          vacuum.lastSeen = Date.now();
+          vacuum.online = true;
 
-      // Set initial battery state
-      const battery = attributes.find((attr) => attr.__class === 'BatteryStateAttribute') as BatteryStateAttribute | undefined;
-      if (battery) {
-        const batPercentRemaining = Math.round(battery.level * 2);
-        let batChargeState = 0;
+          const battery = attributes.find((attr) => attr.__class === 'BatteryStateAttribute') as BatteryStateAttribute | undefined;
+          if (battery) {
+            const batPercentRemaining = Math.round(battery.level * 2);
+            let batChargeState = 0;
 
-        if (battery.flag === 'charging') {
-          batChargeState = 1;
-        } else if (battery.flag === 'charged') {
-          batChargeState = 2;
-        } else if (battery.flag === 'discharging' || battery.flag === 'none') {
-          batChargeState = 3;
-        }
+            if (battery.flag === 'charging') {
+              batChargeState = 1;
+            } else if (battery.flag === 'charged') {
+              batChargeState = 2;
+            } else if (battery.flag === 'discharging' || battery.flag === 'none') {
+              batChargeState = 3;
+            }
 
-        await vacuum.device.setAttribute('PowerSource', 'batPercentRemaining', batPercentRemaining, this.log);
-        await vacuum.device.setAttribute('PowerSource', 'batChargeState', batChargeState, this.log);
-        vacuum.lastBatteryLevel = batPercentRemaining;
-        vacuum.lastBatteryChargeState = batChargeState;
+            // Only send updates when values actually change or on initial state
+            const batteryChanged = vacuum.lastBatteryLevel !== batPercentRemaining;
+            const chargeStateChanged = vacuum.lastBatteryChargeState !== batChargeState;
 
-        this.log.info(`  Initial battery: ${battery.level}% (${batPercentRemaining}/200), charge state: ${batChargeState}`);
-      }
+            if (vacuum.initialStatePending || batteryChanged) {
+              this.log.info(`[${vacuum.name}] Battery: ${battery.level}% (${batPercentRemaining}/200)`);
+              await vacuum.device.setAttribute('PowerSource', 'batPercentRemaining', batPercentRemaining, this.log);
+              vacuum.lastBatteryLevel = batPercentRemaining;
+              await new Promise((resolve) => setTimeout(resolve, 200));
+            }
 
-      // Set initial operational state and run mode
-      const statusAttr = attributes.find((attr) => attr.__class === 'StatusStateAttribute') as { value: string; flag?: string } | undefined;
-      const dockStatus = attributes.find((attr) => attr.__class === 'DockStatusStateAttribute') as { value: string } | undefined;
-
-      if (statusAttr) {
-        const operationalState = this.mapValetudoStatusToOperationalState(statusAttr.value, dockStatus?.value);
-        await vacuum.device.setAttribute('RvcOperationalState', 'operationalState', operationalState, this.log);
-        vacuum.lastOperationalState = operationalState;
-
-        const runMode = this.mapValetudoStatusToRunMode(statusAttr.value);
-        await vacuum.device.setAttribute('RvcRunMode', 'currentMode', runMode, this.log);
-        vacuum.lastRunMode = runMode;
-
-        this.log.info(`  Initial state: "${statusAttr.value}" (operational: ${operationalState}, run mode: ${runMode})`);
-      }
-    } catch (error) {
-      this.log.error(`[${vacuum.name}] Error setting initial state: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  /**
-   * Setup state events listeners and update state for a specific vacuum
-   */
-  private async setupListeners(vacuum: VacuumInstance): Promise<void> {
-    vacuum.client.on('StateAttributesUpdated', async (attributes: StateAttribute[]) => {
-      if (!vacuum.device) return;
-      vacuum.lastSeen = Date.now();
-      vacuum.online = true;
-
-      const battery = attributes.find((attr) => attr.__class === 'BatteryStateAttribute') as BatteryStateAttribute | undefined;
-      if (battery) {
-        const batPercentRemaining = Math.round(battery.level * 2);
-        let batChargeState = 0;
-
-        if (battery.flag === 'charging') {
-          batChargeState = 1;
-        } else if (battery.flag === 'charged') {
-          batChargeState = 2;
-        } else if (battery.flag === 'discharging' || battery.flag === 'none') {
-          batChargeState = 3;
-        }
-
-        // Only send updates when values actually change or on initial state
-        const batteryChanged = vacuum.lastBatteryLevel !== batPercentRemaining;
-        const chargeStateChanged = vacuum.lastBatteryChargeState !== batChargeState;
-
-        if (vacuum.initialStatePending || batteryChanged) {
-          this.log.info(`[${vacuum.name}] Battery: ${battery.level}% (${batPercentRemaining}/200)`);
-          await vacuum.device.setAttribute('PowerSource', 'batPercentRemaining', batPercentRemaining, this.log);
-          vacuum.lastBatteryLevel = batPercentRemaining;
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-
-        if (vacuum.initialStatePending || chargeStateChanged) {
-          this.log.info(`[${vacuum.name}] Battery charge state: ${batChargeState}`);
-          await vacuum.device.setAttribute('PowerSource', 'batChargeState', batChargeState, this.log);
-          vacuum.lastBatteryChargeState = batChargeState;
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-      }
-
-      // Delay before next attribute updates
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      // Extract status and dock status from the same attributes (no extra API call!)
-      const statusAttr = attributes.find((attr) => attr.__class === 'StatusStateAttribute') as { value: string; flag?: string } | undefined;
-      const dockStatus = attributes.find((attr) => attr.__class === 'DockStatusStateAttribute') as { value: string } | undefined;
-
-      if (statusAttr) {
-        const status = statusAttr;
-        // Update operational state
-        const operationalState = this.mapValetudoStatusToOperationalState(status.value, dockStatus?.value);
-        const operationalStateChanged = vacuum.lastOperationalState !== operationalState;
-
-        if (vacuum.initialStatePending || operationalStateChanged) {
-          this.log.info(`[${vacuum.name}] Operational state: "${status.value}" → ${operationalState}`);
-          await vacuum.device.setAttribute('RvcOperationalState', 'operationalState', operationalState, this.log);
-          vacuum.lastOperationalState = operationalState;
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-
-        // Update run mode
-        const runMode = this.mapValetudoStatusToRunMode(status.value);
-        const runModeChanged = vacuum.lastRunMode !== runMode;
-
-        if (vacuum.initialStatePending || runModeChanged) {
-          this.log.info(`[${vacuum.name}] Run mode: ${status.value} → ${runMode === 1 ? 'Idle' : 'Cleaning'}`);
-          await vacuum.device.setAttribute('RvcRunMode', 'currentMode', runMode, this.log);
-          vacuum.lastRunMode = runMode;
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-      }
-
-      // Clear initial state pending flag after first successful update
-      if (vacuum.initialStatePending) {
-        vacuum.initialStatePending = false;
-        this.log.debug(`[${vacuum.name}] Initial state set successfully`);
-      }
-    });
-
-    vacuum.client.on('MapUpdated', async (mapData: MapData) => {
-      if (!vacuum.device) return;
-      vacuum.lastSeen = Date.now();
-      vacuum.online = true;
-      // Position tracking with cached map layers
-      const config = this.config as { positionTracking?: { enabled?: boolean } };
-      if (config.positionTracking?.enabled !== false && vacuum.areaToSegmentMap.size > 0) {
-        try {
-          // Initialize or refresh cache if needed
-          if (!vacuum.mapLayersCache || Date.now() > vacuum.mapCacheValidUntil) {
-            const config = this.config as { mapCache?: { refreshIntervalHours?: number } };
-            const refreshHours = Math.max(0.1, Math.min(24, config.mapCache?.refreshIntervalHours ?? 1));
-            vacuum.mapLayersCache = vacuum.client.createCachedLayers(mapData);
-            vacuum.mapCacheValidUntil = Date.now() + refreshHours * 60 * 60 * 1000;
-            this.log.debug(`[${vacuum.name}] Map cache refreshed`);
+            if (vacuum.initialStatePending || chargeStateChanged) {
+              this.log.info(`[${vacuum.name}] Battery charge state: ${batChargeState}`);
+              await vacuum.device.setAttribute('PowerSource', 'batChargeState', batChargeState, this.log);
+              vacuum.lastBatteryChargeState = batChargeState;
+              await new Promise((resolve) => setTimeout(resolve, 200));
+            }
           }
 
-          // Skip position tracking if cache still not available
-          if (!vacuum.mapLayersCache) {
-            this.log.debug(`[${vacuum.name}] Map cache not available, skipping position tracking`);
-          } else {
-            const positionData = mapData as MapPositionData;
-            if (positionData) {
-              // Check map version
-              if (positionData.metaData?.version !== undefined && positionData.metaData.version !== vacuum.mapLayersCache.version) {
-                this.log.warn(`[${vacuum.name}] Map version changed, refreshing cache...`);
-                await this.refreshMapCacheForVacuum(vacuum);
+          // Delay before next attribute updates
+          await new Promise((resolve) => setTimeout(resolve, 200));
+
+          // Extract status and dock status from the same attributes (no extra API call!)
+          const statusAttr = attributes.find((attr) => attr.__class === 'StatusStateAttribute') as { value: string; flag?: string } | undefined;
+          const dockStatus = attributes.find((attr) => attr.__class === 'DockStatusStateAttribute') as { value: string } | undefined;
+
+          if (statusAttr) {
+            const status = statusAttr;
+            // Update operational state
+            const operationalState = this.mapValetudoStatusToOperationalState(status.value, dockStatus?.value);
+            const operationalStateChanged = vacuum.lastOperationalState !== operationalState;
+
+            if (vacuum.initialStatePending || operationalStateChanged) {
+              this.log.info(`[${vacuum.name}] Operational state: "${status.value}" → ${operationalState}`);
+              await vacuum.device.setAttribute('RvcOperationalState', 'operationalState', operationalState, this.log);
+              vacuum.lastOperationalState = operationalState;
+              await new Promise((resolve) => setTimeout(resolve, 200));
+            }
+
+            // Update run mode
+            const runMode = this.mapValetudoStatusToRunMode(status.value);
+            const runModeChanged = vacuum.lastRunMode !== runMode;
+
+            if (vacuum.initialStatePending || runModeChanged) {
+              this.log.info(`[${vacuum.name}] Run mode: ${status.value} → ${runMode === 1 ? 'Idle' : 'Cleaning'}`);
+              await vacuum.device.setAttribute('RvcRunMode', 'currentMode', runMode, this.log);
+              vacuum.lastRunMode = runMode;
+              await new Promise((resolve) => setTimeout(resolve, 200));
+            }
+          }
+
+          // Clear initial state pending flag after first successful update
+          if (vacuum.initialStatePending) {
+            vacuum.initialStatePending = false;
+            this.log.debug(`[${vacuum.name}] Initial state set successfully`);
+          }
+        },
+      }),
+    );
+
+    vacuum.subscriptions.add(
+      vacuum.client.getMapDataObservable().subscribe({
+        next: async (mapData: MapData) => {
+          if (!vacuum.device) return;
+          vacuum.lastSeen = Date.now();
+          vacuum.online = true;
+          // Position tracking with cached map layers
+          if (config.positionTracking?.enabled !== false && vacuum.areaToSegmentMap.size > 0) {
+            try {
+              // Initialize or refresh cache if needed
+              if (!vacuum.mapLayersCache || Date.now() > vacuum.mapCacheValidUntil) {
+                this.refreshMapCacheForVacuum(vacuum, mapData);
               }
 
-              // Extract robot position
-              const robotEntity = positionData.entities.find((entity) => entity.type === 'robot_position');
-              if (robotEntity && robotEntity.points.length >= 2 && vacuum.mapLayersCache) {
-                const robotPos = {
-                  x: Math.round(robotEntity.points[0] / vacuum.mapLayersCache.pixelSize),
-                  y: Math.round(robotEntity.points[1] / vacuum.mapLayersCache.pixelSize),
-                };
-
-                const currentSegment = vacuum.client.findSegmentAtPositionCached(vacuum.mapLayersCache, robotPos.x, robotPos.y);
-
-                if (currentSegment) {
-                  let foundAreaId: number | null = null;
-                  for (const [areaId, segmentInfo] of vacuum.areaToSegmentMap.entries()) {
-                    if (segmentInfo.id === currentSegment.metaData.segmentId) {
-                      foundAreaId = areaId;
-                      break;
-                    }
+              // Skip position tracking if cache still not available
+              if (!vacuum.mapLayersCache) {
+                this.log.debug(`[${vacuum.name}] Map cache not available, skipping position tracking`);
+              } else {
+                const positionData = { entities: mapData.entities, metaData: mapData.metaData } as MapPositionData;
+                if (positionData) {
+                  // Check map version
+                  if (positionData.metaData?.version !== undefined && positionData.metaData.version !== vacuum.mapLayersCache.version) {
+                    this.log.warn(`[${vacuum.name}] Map version changed, refreshing cache...`);
+                    await this.refreshMapCacheForVacuum(vacuum, mapData);
                   }
 
-                  if (foundAreaId !== null && vacuum.lastCurrentArea !== foundAreaId) {
-                    const segmentInfo = vacuum.areaToSegmentMap.get(foundAreaId);
-                    this.log.info(`[${vacuum.name}] Location: ${segmentInfo?.name || 'Unknown'} (area ${foundAreaId})`);
-                    await vacuum.device.setAttribute('ServiceArea', 'currentArea', foundAreaId, this.log);
-                    vacuum.lastCurrentArea = foundAreaId;
+                  // Extract robot position
+                  const robotEntity = positionData.entities.find((entity) => entity.type === 'robot_position');
+                  if (robotEntity && robotEntity.points.length >= 2 && vacuum.mapLayersCache) {
+                    const robotPos = {
+                      x: Math.round(robotEntity.points[0] / vacuum.mapLayersCache.pixelSize),
+                      y: Math.round(robotEntity.points[1] / vacuum.mapLayersCache.pixelSize),
+                    };
+
+                    const currentSegment = vacuum.client.findSegmentAtPositionCached(vacuum.mapLayersCache, robotPos.x, robotPos.y);
+
+                    if (currentSegment) {
+                      let foundAreaId: number | null = null;
+                      for (const [areaId, segmentInfo] of vacuum.areaToSegmentMap.entries()) {
+                        if (segmentInfo.id === currentSegment.metaData.segmentId) {
+                          foundAreaId = areaId;
+                          break;
+                        }
+                      }
+
+                      if (foundAreaId !== null && vacuum.lastCurrentArea !== foundAreaId) {
+                        const segmentInfo = vacuum.areaToSegmentMap.get(foundAreaId);
+                        this.log.info(`[${vacuum.name}] Location: ${segmentInfo?.name || 'Unknown'} (area ${foundAreaId})`);
+                        await vacuum.device.setAttribute('ServiceArea', 'currentArea', foundAreaId, this.log);
+                        vacuum.lastCurrentArea = foundAreaId;
+                      }
+                    }
                   }
                 }
               }
+            } catch (error) {
+              this.log.debug(`[${vacuum.name}] Position tracking error: ${error instanceof Error ? error.message : String(error)}`);
             }
           }
-        } catch (error) {
-          this.log.debug(`[${vacuum.name}] Position tracking error: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-    });
+        },
+      }),
+    );
+    vacuum.subscriptions.add(
+      vacuum.client.getConsumablesObservable().subscribe({
+        next: async (consumables: ValetudoConsumable[]) => {
+          vacuum.lastSeen = Date.now();
+          vacuum.online = true;
+          const warningThreshold = (config.consumables?.warningThreshold || 10) / 100;
 
-    vacuum.client.on('ConsumablesUpdated', async (consumables: ValetudoConsumable[]) => {
-      const config = this.config as {
-        consumables?: {
-          warningThreshold?: number;
-        };
-      };
+          try {
+            for (const consumable of consumables) {
+              const name = this.getConsumableName(consumable);
+              const entry = vacuum.consumableMap.get(name);
 
-      const warningThreshold = (config.consumables?.warningThreshold || 10) / 100;
+              if (!entry) continue;
+              if (!entry.properties) {
+                this.log.warn(`No properties found for consumable ${entry.consumable.type}-${entry.consumable.subType}`);
+                continue;
+              }
 
-      try {
-        for (const consumable of consumables) {
-          const name = this.getConsumableName(consumable);
-          const entry = vacuum.consumableMap.get(name);
+              const remaining = consumable.remaining.value;
+              entry.consumable.remaining.value = remaining;
+              const needsReplacement = remaining / entry.properties.maxValue <= warningThreshold;
 
-          if (!entry) continue;
-          if (!entry.properties) {
-            this.log.warn(`No properties found for consumable ${entry.consumable.type}-${entry.consumable.subType}`);
-            continue;
+              // Log status change
+              if (entry.lastState === undefined || entry.lastState !== needsReplacement) {
+                const status = needsReplacement ? '⚠️ NEEDS REPLACEMENT' : '✓ OK';
+                this.log.info(`[${vacuum.name}] ${name}: ${remaining} ${consumable.remaining.unit} - ${status}`);
+                entry.lastState = needsReplacement;
+              }
+
+              // Update contact sensor if it exists
+              if (entry.endpoint) {
+                await entry.endpoint.setAttribute('BooleanState', 'stateValue', !needsReplacement, this.log);
+              }
+            }
+          } catch (error) {
+            this.log.debug(`[${vacuum.name}] Error updating consumables: ${error instanceof Error ? error.message : String(error)}`);
           }
-
-          const remaining = consumable.remaining.value;
-          entry.consumable.remaining.value = remaining;
-          const needsReplacement = remaining / entry.properties.maxValue <= warningThreshold;
-
-          // Log status change
-          if (entry.lastState === undefined || entry.lastState !== needsReplacement) {
-            const status = needsReplacement ? '⚠️ NEEDS REPLACEMENT' : '✓ OK';
-            this.log.info(`[${vacuum.name}] ${name}: ${remaining} ${consumable.remaining.unit} - ${status}`);
-            entry.lastState = needsReplacement;
-          }
-
-          // Update contact sensor if it exists
-          if (entry.endpoint) {
-            await entry.endpoint.setAttribute('BooleanState', 'stateValue', !needsReplacement, this.log);
-          }
-        }
-      } catch (error) {
-        this.log.debug(`[${vacuum.name}] Error updating consumables: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    });
+        },
+      }),
+    );
     return;
   }
 
   /**
    * Refresh map cache for a specific vacuum
    */
-  private async refreshMapCacheForVacuum(vacuum: VacuumInstance): Promise<void> {
+  private async refreshMapCacheForVacuum(vacuum: VacuumInstance, mapDataInput?: MapData): Promise<void> {
     const config = this.config as { mapCache?: { refreshIntervalHours?: number } };
     const refreshHours = Math.max(0.1, Math.min(24, config.mapCache?.refreshIntervalHours ?? 1));
 
-    const mapData = await vacuum.client.getMapDataWithTimeout(60000);
+    const mapData = mapDataInput ? mapDataInput : await vacuum.client.getMapDataWithTimeout(60000);
     if (mapData) {
       vacuum.mapLayersCache = vacuum.client.createCachedLayers(mapData);
       vacuum.mapCacheValidUntil = Date.now() + refreshHours * 60 * 60 * 1000;
