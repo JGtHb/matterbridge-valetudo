@@ -52,15 +52,6 @@ interface VacuumInstance {
   consumableMap: Map<string, { endpoint?: MatterbridgeEndpoint; consumable: ValetudoConsumable; properties: ConsumableProperties; lastState?: boolean }>;
   mapLayersCache: CachedMapLayers | null;
   mapCacheValidUntil: number;
-  lastCurrentArea: number | null;
-  lastConsumablesCheck: number;
-
-  // Change tracking
-  lastBatteryLevel: number | null;
-  lastBatteryChargeState: number | null;
-  lastOperationalState: number | null;
-  lastRunMode: number | null;
-  initialStatePending: boolean; // Flag to set initial state on first poll
 
   // Metadata
   source: 'mdns' | 'manual';
@@ -307,13 +298,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       consumableMap: new Map(),
       mapLayersCache: null,
       mapCacheValidUntil: 0,
-      lastCurrentArea: null,
-      lastConsumablesCheck: 0,
-      lastBatteryLevel: null,
-      lastBatteryChargeState: null,
-      lastOperationalState: null,
-      lastRunMode: null,
-      initialStatePending: true,
       source,
       lastSeen: Date.now(),
       online: true,
@@ -634,7 +618,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         await vacuum.device.setAttribute('ServiceArea', 'supportedAreas', supportedAreas, this.log);
         await new Promise((resolve) => setTimeout(resolve, 200));
         await vacuum.device.setAttribute('ServiceArea', 'currentArea', supportedAreas[0].areaId, this.log);
-        vacuum.lastCurrentArea = supportedAreas[0].areaId;
         this.log.info(`  Initial currentArea set to: ${supportedAreas[0].areaId}`);
       } else {
         this.log.warn(`  No supportedAreas to set! supportedAreas is ${supportedAreas ? 'empty array' : 'undefined'}`);
@@ -836,6 +819,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
    * Setup subsriptions and update state for a specific vacuum
    */
   private async setupSubscriptions(vacuum: VacuumInstance): Promise<void> {
+    this.log.info(`Setting up subscriptions for vacuum: ${vacuum.name}`);
     const config = this.config as {
       mapCache?: { refreshIntervalHours?: number };
       positionTracking?: { enabled?: boolean };
@@ -864,23 +848,15 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
               batChargeState = 3;
             }
 
-            // Only send updates when values actually change or on initial state
-            const batteryChanged = vacuum.lastBatteryLevel !== batPercentRemaining;
-            const chargeStateChanged = vacuum.lastBatteryChargeState !== batChargeState;
-
-            if (vacuum.initialStatePending || batteryChanged) {
+            if (await vacuum.device.updateAttribute('PowerSource', 'batPercentRemaining', batPercentRemaining, this.log)) {
               this.log.info(`[${vacuum.name}] Battery: ${battery.level}% (${batPercentRemaining}/200)`);
-              await vacuum.device.setAttribute('PowerSource', 'batPercentRemaining', batPercentRemaining, this.log);
-              vacuum.lastBatteryLevel = batPercentRemaining;
-              await new Promise((resolve) => setTimeout(resolve, 200));
             }
+            await new Promise((resolve) => setTimeout(resolve, 200));
 
-            if (vacuum.initialStatePending || chargeStateChanged) {
+            if (await vacuum.device.updateAttribute('PowerSource', 'batChargeState', batChargeState, this.log)) {
               this.log.info(`[${vacuum.name}] Battery charge state: ${batChargeState}`);
-              await vacuum.device.setAttribute('PowerSource', 'batChargeState', batChargeState, this.log);
-              vacuum.lastBatteryChargeState = batChargeState;
-              await new Promise((resolve) => setTimeout(resolve, 200));
             }
+            await new Promise((resolve) => setTimeout(resolve, 200));
           }
 
           // Delay before next attribute updates
@@ -894,31 +870,19 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
             const status = statusAttr;
             // Update operational state
             const operationalState = this.mapValetudoStatusToOperationalState(status.value, dockStatus?.value);
-            const operationalStateChanged = vacuum.lastOperationalState !== operationalState;
 
-            if (vacuum.initialStatePending || operationalStateChanged) {
+            if (await vacuum.device.updateAttribute('RvcOperationalState', 'operationalState', operationalState, this.log)) {
               this.log.info(`[${vacuum.name}] Operational state: "${status.value}" → ${operationalState}`);
-              await vacuum.device.setAttribute('RvcOperationalState', 'operationalState', operationalState, this.log);
-              vacuum.lastOperationalState = operationalState;
-              await new Promise((resolve) => setTimeout(resolve, 200));
             }
+            await new Promise((resolve) => setTimeout(resolve, 200));
 
             // Update run mode
             const runMode = this.mapValetudoStatusToRunMode(status.value);
-            const runModeChanged = vacuum.lastRunMode !== runMode;
 
-            if (vacuum.initialStatePending || runModeChanged) {
+            if (await vacuum.device.updateAttribute('RvcRunMode', 'currentMode', runMode, this.log)) {
               this.log.info(`[${vacuum.name}] Run mode: ${status.value} → ${runMode === 1 ? 'Idle' : 'Cleaning'}`);
-              await vacuum.device.setAttribute('RvcRunMode', 'currentMode', runMode, this.log);
-              vacuum.lastRunMode = runMode;
-              await new Promise((resolve) => setTimeout(resolve, 200));
             }
-          }
-
-          // Clear initial state pending flag after first successful update
-          if (vacuum.initialStatePending) {
-            vacuum.initialStatePending = false;
-            this.log.debug(`[${vacuum.name}] Initial state set successfully`);
+            await new Promise((resolve) => setTimeout(resolve, 200));
           }
         },
       }),
@@ -969,11 +933,11 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
                         }
                       }
 
-                      if (foundAreaId !== null && vacuum.lastCurrentArea !== foundAreaId) {
-                        const segmentInfo = vacuum.areaToSegmentMap.get(foundAreaId);
-                        this.log.info(`[${vacuum.name}] Location: ${segmentInfo?.name || 'Unknown'} (area ${foundAreaId})`);
-                        await vacuum.device.setAttribute('ServiceArea', 'currentArea', foundAreaId, this.log);
-                        vacuum.lastCurrentArea = foundAreaId;
+                      if (foundAreaId !== null) {
+                        if (await vacuum.device.updateAttribute('ServiceArea', 'currentArea', foundAreaId, this.log)) {
+                          const segmentInfo = vacuum.areaToSegmentMap.get(foundAreaId);
+                          this.log.info(`[${vacuum.name}] Location: ${segmentInfo?.name || 'Unknown'} (area ${foundAreaId})`);
+                        }
                       }
                     }
                   }
@@ -1017,7 +981,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
               // Update contact sensor if it exists
               if (entry.endpoint) {
-                await entry.endpoint.setAttribute('BooleanState', 'stateValue', !needsReplacement, this.log);
+                await entry.endpoint.updateAttribute('BooleanState', 'stateValue', !needsReplacement, this.log);
               }
             }
           } catch (error) {
