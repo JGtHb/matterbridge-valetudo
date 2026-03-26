@@ -10,7 +10,7 @@
 import { MatterbridgeDynamicPlatform, MatterbridgeEndpoint, PlatformConfig, contactSensor } from 'matterbridge';
 import { RoboticVacuumCleaner } from 'matterbridge/devices';
 import { AnsiLogger, LogLevel } from 'matterbridge/logger';
-import { RvcCleanMode, RvcOperationalState, RvcRunMode } from 'matterbridge/matter/clusters';
+import { RvcCleanMode, RvcOperationalState, RvcRunMode, ServiceArea } from 'matterbridge/matter/clusters';
 import { Subscription } from 'rxjs';
 
 // Derive PlatformMatterbridge type from the parent class constructor to avoid
@@ -18,7 +18,7 @@ import { Subscription } from 'rxjs';
 type PlatformMatterbridge = ConstructorParameters<typeof MatterbridgeDynamicPlatform>[0];
 
 import {
-  BatteryStateAttribute,
+  BatteryFlag,
   CachedMapLayers,
   ConsumableProperties,
   MapData,
@@ -36,7 +36,6 @@ import { ValetudoDiscovery } from './valetudo-discovery.js';
  */
 interface VacuumInstance {
   id: string; // systemId from Valetudo
-  ip: string;
   name: string;
   client: ValetudoClient;
   device: RoboticVacuumCleaner | null;
@@ -44,7 +43,6 @@ interface VacuumInstance {
 
   // Per-vacuum state
   capabilities: string[];
-  operationModes: string[];
   modeMap: Map<number, { fanSpeed?: PresetLevel; waterUsage?: PresetLevel; operationMode?: ValetudoOperationMode }>;
   areaToSegmentMap: Map<number, { id: string; name: string }>;
   selectedSegmentIds: string[];
@@ -198,7 +196,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       for (const vacuum of discovered) {
         try {
           // Check if already added manually
-          const existing = Array.from(this.vacuums.values()).find((v) => v.ip === vacuum.ip);
+          const existing = Array.from(this.vacuums.values()).find((v) => v.client.ip === vacuum.ip);
           if (existing) {
             this.log.info(`Vacuum at ${vacuum.ip} already added manually, skipping mDNS entry`);
             continue;
@@ -250,9 +248,8 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     // Check for duplicate systemId
     const existing = this.vacuums.get(info.systemId);
     if (existing) {
-      if (existing.ip !== ip) {
-        this.log.warn(`Vacuum ${info.systemId} already exists at ${existing.ip}, now found at ${ip}. Updating IP address.`);
-        existing.ip = ip;
+      if (existing.client.ip !== ip) {
+        this.log.warn(`Vacuum ${info.systemId} already exists at ${existing.client.ip}, now found at ${ip}. Updating client.`);
         existing.client = client;
         existing.lastSeen = Date.now();
         return;
@@ -284,13 +281,11 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     // Create vacuum instance
     const vacuum: VacuumInstance = {
       id: info.systemId,
-      ip,
       name: deviceName,
       client,
       device: null,
       subscriptions: new Subscription(),
       capabilities: [],
-      operationModes: [],
       areaToSegmentMap: new Map(),
       modeMap: new Map(),
       selectedSegmentIds: [],
@@ -345,30 +340,8 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     this.log.info(`Creating Matter device for vacuum: ${vacuum.name}`);
 
     try {
-      // Fetch robot info for device details
-      const robotInfo = await vacuum.client.getRobotInfo();
-      if (!robotInfo) {
-        throw new Error('Failed to fetch robot information');
-      }
-
       // Fetch map segments (rooms/areas) if supported
-      let supportedAreas:
-        | Array<{
-            areaId: number;
-            mapId: number | null;
-            areaInfo: {
-              locationInfo: {
-                locationName: string;
-                floorNumber: number | null;
-                areaType: number | null;
-              } | null;
-              landmarkInfo: {
-                landmarkTag: number;
-                relativePositionTag: number | null;
-              } | null;
-            };
-          }>
-        | undefined;
+      let supportedAreas: ServiceArea.Area[] | undefined;
 
       if (vacuum.capabilities.includes('MapSegmentationCapability')) {
         const segments = await vacuum.client.getMapSegments();
@@ -417,7 +390,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       }
 
       // Build run modes
-      const supportedRunModes: Array<{ label: string; mode: number; modeTags: Array<{ value: number }> }> = [
+      const supportedRunModes: RvcRunMode.ModeOption[] = [
         { label: 'Idle', mode: RvcRunModeValue.Idle, modeTags: [{ value: RvcRunMode.ModeTag.Idle }] },
         { label: 'Cleaning', mode: RvcRunModeValue.Cleaning, modeTags: [{ value: RvcRunMode.ModeTag.Cleaning }] },
       ];
@@ -431,7 +404,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       }
 
       // Build clean modes
-      const supportedCleanModes: Array<{ label: string; mode: number; modeTags: Array<{ value: number }> }> = [];
+      const supportedCleanModes: RvcCleanMode.ModeOption[] = [];
 
       let fanSpeedPresets: PresetLevel[] | null = null;
       let waterUsagePresets: PresetLevel[] | null = null;
@@ -654,12 +627,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       this.log.info(`[${vacuum.name}] changeToMode called: ${JSON.stringify(data)}`);
 
       const request = data.request as { newMode: number };
-      const isRunMode = request.newMode >= 1 && request.newMode <= 3;
 
-      if (isRunMode) {
-        // Run mode change
-        if (request.newMode === 2) {
-          // Start cleaning
+      switch (request.newMode) {
+        case RvcRunModeValue.Cleaning: {
           if (vacuum.selectedSegmentIds.length > 0) {
             this.log.info(`[${vacuum.name}] Starting room cleaning: ${vacuum.selectedRoomNames.join(', ')}`);
             const properties = await vacuum.client.getMapSegmentationProperties();
@@ -668,19 +638,26 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
             this.log.info(`[${vacuum.name}] Starting full home cleaning`);
             await vacuum.client.startCleaning();
           }
-        } else if (request.newMode === 1) {
+          break;
+        }
+        case RvcRunModeValue.Idle: {
           this.log.info(`[${vacuum.name}] Stopping cleaning`);
           await vacuum.client.stopCleaning();
           vacuum.selectedSegmentIds = [];
           vacuum.selectedRoomNames = [];
+          break;
         }
-      } else {
-        // Clean mode change
-        const modeConfig = vacuum.modeMap.get(request.newMode);
-        const fanSpeed = modeConfig?.fanSpeed;
-        const waterUsage = modeConfig?.waterUsage;
+        case RvcRunModeValue.Mapping: {
+          await vacuum.client.startMapping();
+          break;
+        }
+        default: {
+          const modeConfig = vacuum.modeMap.get(request.newMode);
+          const fanSpeed = modeConfig?.fanSpeed;
+          const waterUsage = modeConfig?.waterUsage;
 
-        if (modeConfig) {
+          if (!modeConfig) return;
+
           if (modeConfig.operationMode && vacuum.capabilities.includes('OperationModeControlCapability')) {
             this.log.info(`[${vacuum.name}] Setting mode '${modeConfig.operationMode}'`);
             await vacuum.client.setOperationMode(modeConfig.operationMode);
@@ -695,6 +672,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
             this.log.info(`[${vacuum.name}] Setting water '${waterUsage}'`);
             await vacuum.client.setWaterUsage(waterUsage);
           }
+          break;
         }
       }
     });
@@ -828,6 +806,13 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       };
     };
 
+    const batteryFlagStateMap: Record<BatteryFlag, number> = {
+      charging: 1,
+      charged: 2,
+      discharging: 3,
+      none: 3,
+    };
+
     vacuum.subscriptions.add(
       vacuum.client.getStateAttributesObservable().subscribe({
         next: async (attributes: StateAttribute[]) => {
@@ -835,18 +820,10 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
           vacuum.lastSeen = Date.now();
           vacuum.online = true;
 
-          const battery = attributes.find((attr) => attr.__class === 'BatteryStateAttribute') as BatteryStateAttribute | undefined;
+          const battery = attributes.find((attr) => attr.__class === 'BatteryStateAttribute');
           if (battery) {
             const batPercentRemaining = Math.round(battery.level * 2);
-            let batChargeState = 0;
-
-            if (battery.flag === 'charging') {
-              batChargeState = 1;
-            } else if (battery.flag === 'charged') {
-              batChargeState = 2;
-            } else if (battery.flag === 'discharging' || battery.flag === 'none') {
-              batChargeState = 3;
-            }
+            const batChargeState = batteryFlagStateMap[battery.flag];
 
             if (await vacuum.device.updateAttribute('PowerSource', 'batPercentRemaining', batPercentRemaining, this.log)) {
               this.log.info(`[${vacuum.name}] Battery: ${battery.level}% (${batPercentRemaining}/200)`);
@@ -862,9 +839,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
           // Delay before next attribute updates
           await new Promise((resolve) => setTimeout(resolve, 200));
 
-          // Extract status and dock status from the same attributes (no extra API call!)
-          const statusAttr = attributes.find((attr) => attr.__class === 'StatusStateAttribute') as { value: string; flag?: string } | undefined;
-          const dockStatus = attributes.find((attr) => attr.__class === 'DockStatusStateAttribute') as { value: string } | undefined;
+          // Extract status and dock status from the same attributes
+          const statusAttr = attributes.find((attr) => attr.__class === 'StatusStateAttribute');
+          const dockStatus = attributes.find((attr) => attr.__class === 'DockStatusStateAttribute');
 
           if (statusAttr) {
             const status = statusAttr;

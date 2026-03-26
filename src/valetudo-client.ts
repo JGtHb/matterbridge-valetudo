@@ -195,15 +195,12 @@ export interface MapPositionData {
 // ============================================================================
 
 export class ValetudoClient {
-  private baseUrl: string;
+  private _baseUrl: string;
   private log: AnsiLogger;
   private authHeader: string | null = null;
-  private attributesEvents: EventSource | null = null;
-  private mapEvents: EventSource | null = null;
-  private consumablesInterval: NodeJS.Timeout | null = null;
 
   constructor(ip: string, log: AnsiLogger, username?: string, password?: string) {
-    this.baseUrl = `http://${ip}`;
+    this._baseUrl = `http://${ip}`;
     this.log = log;
 
     // Pre-compute Base64 Authorization header if credentials are provided
@@ -215,6 +212,14 @@ export class ValetudoClient {
   // ==========================================================================
   // General Information
   // ==========================================================================
+
+  get baseUrl() {
+    return this._baseUrl;
+  }
+
+  get ip() {
+    return this.baseUrl.substring('http://'.length);
+  }
 
   /**
    * Fetch basic Valetudo information
@@ -399,6 +404,21 @@ export class ValetudoClient {
    */
   async returnHome(): Promise<boolean> {
     return this.home();
+  }
+
+  /**
+   * Start mapping
+   */
+  async startMapping(): Promise<boolean> {
+    try {
+      const result = await this.httpPut(`${this.baseUrl}/api/v2/robot/capabilities/MappingPassCapability`, {
+        action: 'start_mapping',
+      });
+      return result !== null;
+    } catch (error) {
+      this.log.error(`Error starting mapping: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
   }
 
   // ==========================================================================
