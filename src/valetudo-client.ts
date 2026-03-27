@@ -238,6 +238,9 @@ export class ValetudoClient {
     }
   }
 
+  /**
+   * Fetch Valetudo customizations
+   */
   async getCustomizations(): Promise<ValetudoCustomizations | null> {
     try {
       const url = `${this.baseUrl}/api/v2/valetudo/config/customizations`;
@@ -293,7 +296,15 @@ export class ValetudoClient {
     }
   }
 
-  getStateAttributesObservable(): Observable<StateAttribute[]> {
+  /**
+   * Subscribe to robot state attributes via Server-Sent Events (SSE).
+   *
+   * Emits the current attributes once on subscription, then emits updates
+   * whenever Valetudo sends a StateAttributesUpdated event.
+   *
+   * @returns Observable stream of state attributes
+   */
+  getStateAttributes$(): Observable<StateAttribute[]> {
     let eventSource: EventSource | null = null;
     return new Observable<StateAttribute[]>((subscriber) => {
       this.getStateAttributes()
@@ -586,8 +597,15 @@ export class ValetudoClient {
     }
   }
 
-  getMapDataObservable(): Observable<MapData> {
-    const url = `${this.baseUrl}/api/v2/robot/state/map`;
+  /**
+   * Subscribe to map data via Server-Sent Events (SSE).
+   *
+   * Emits the current map once on subscription, then emits updates
+   * whenever Valetudo sends a MapUpdated event.
+   *
+   * @returns Observable stream of map data
+   */
+  getMapData$(): Observable<MapData> {
     let eventSource: EventSource | null = null;
     return new Observable<MapData>((subscriber) => {
       this.getMapDataWithTimeout(10000)
@@ -596,7 +614,7 @@ export class ValetudoClient {
 
           if (data) subscriber.next(data);
 
-          eventSource = new EventSource(`${url}/sse`);
+          eventSource = new EventSource(`${this.baseUrl}/api/v2/robot/state/map/sse`);
           eventSource.addEventListener('MapUpdated', (e: MessageEvent) => {
             if (subscriber.closed) return;
             try {
@@ -735,7 +753,16 @@ export class ValetudoClient {
     }
   }
 
-  getConsumablesObservable(interval: number = 5 * 60 * 1000): Observable<ValetudoConsumable[]> {
+  /**
+   * Subscribe to consumables status updates.
+   *
+   * Emits the current consumables once on subscription, then polls
+   * periodically using the provided interval.
+   *
+   * @param interval - Polling interval in milliseconds (default: 5 minutes)
+   * @returns Observable stream of consumables data
+   */
+  getConsumables$(interval: number = 5 * 60 * 1000): Observable<ValetudoConsumable[]> {
     let consumablesInterval: NodeJS.Timeout | null = null;
     return new Observable<ValetudoConsumable[]>((subscriber) => {
       this.getConsumables()

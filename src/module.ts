@@ -550,28 +550,38 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         null,
         undefined,
         undefined,
-        undefined,
+        supportedAreas,
         [],
-        undefined,
+        supportedAreas?.at(0)?.areaId,
         undefined,
       );
 
+      if (supportedAreas && supportedAreas.length > 0) {
+        this.log.info(`  Initial currentArea set to: ${supportedAreas[0].areaId}`);
+      } else {
+        this.log.warn(`  No supportedAreas to set! supportedAreas is ${supportedAreas ? 'empty array' : 'undefined'}`);
+      }
+
       // Set up command handlers for this vacuum
       this.setupCommandHandlersForVacuum(vacuum);
+
+      const valetudoInfo = await vacuum.client.getRobotInfo();
 
       // Register device
       vacuum.device.softwareVersion = 1;
       vacuum.device.softwareVersionString = this.version || '1.0.0';
       vacuum.device.hardwareVersion = 1;
       vacuum.device.hardwareVersionString = this.matterbridge.matterbridgeVersion;
+      vacuum.device.productName = `${valetudoInfo?.manufacturer} ${valetudoInfo?.modelName}`;
+      vacuum.device.vendorName = 'Valetudo';
 
       if (!vacuum.device.mode) {
         vacuum.device.createDefaultBridgedDeviceBasicInformationClusterServer(
           vacuum.device.deviceName || vacuum.name,
           vacuum.device.serialNumber || vacuum.id,
           this.matterbridge.aggregatorVendorId,
-          vacuum.device.vendorName || 'Valetudo',
-          vacuum.device.productName || 'Robot Vacuum',
+          vacuum.device.vendorName,
+          vacuum.device.productName,
           vacuum.device.softwareVersion,
           vacuum.device.softwareVersionString,
           vacuum.device.hardwareVersion,
@@ -582,19 +592,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       // After registration, add areas and set currentArea
       await this.registerDevice(vacuum.device);
 
-      this.log.info(`  Matter device created and registered successfully`);
-
-      if (supportedAreas && supportedAreas.length > 0) {
-        this.log.info(`  Setting ${supportedAreas.length} supported areas...`);
-        this.log.info(`  Area names: ${supportedAreas.map((a) => a.areaInfo.locationInfo?.locationName).join(', ')}`);
-
-        await vacuum.device.setAttribute('ServiceArea', 'supportedAreas', supportedAreas, this.log);
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        await vacuum.device.setAttribute('ServiceArea', 'currentArea', supportedAreas[0].areaId, this.log);
-        this.log.info(`  Initial currentArea set to: ${supportedAreas[0].areaId}`);
-      } else {
-        this.log.warn(`  No supportedAreas to set! supportedAreas is ${supportedAreas ? 'empty array' : 'undefined'}`);
-      }
+      this.log.info(
+        `  Matter device created and registered successfully, ${vacuum.device.hardwareVersion}, ${vacuum.device.hardwareVersionString}, ${vacuum.device.softwareVersion}, ${vacuum.device.softwareVersionString}`,
+      );
 
       // Set up consumables for this vacuum
       await this.setupConsumablesForVacuum(vacuum);
@@ -814,7 +814,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     };
 
     vacuum.subscriptions.add(
-      vacuum.client.getStateAttributesObservable().subscribe({
+      vacuum.client.getStateAttributes$().subscribe({
         next: async (attributes: StateAttribute[]) => {
           if (!vacuum.device) return;
           vacuum.lastSeen = Date.now();
@@ -866,7 +866,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     );
 
     vacuum.subscriptions.add(
-      vacuum.client.getMapDataObservable().subscribe({
+      vacuum.client.getMapData$().subscribe({
         next: async (mapData: MapData) => {
           if (!vacuum.device) return;
           vacuum.lastSeen = Date.now();
@@ -928,7 +928,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       }),
     );
     vacuum.subscriptions.add(
-      vacuum.client.getConsumablesObservable().subscribe({
+      vacuum.client.getConsumables$().subscribe({
         next: async (consumables: ValetudoConsumable[]) => {
           vacuum.lastSeen = Date.now();
           vacuum.online = true;
