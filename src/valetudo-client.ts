@@ -245,7 +245,7 @@ export class ValetudoClient {
     try {
       const url = `${this.baseUrl}/api/v2/valetudo/config/customizations`;
       const data = await this.httpGet(url);
-      this.log.debug(`Customizations recieved: ${JSON.stringify(data)}`);
+      this.log.debug(`Customizations received: ${JSON.stringify(data)}`);
       return data as ValetudoCustomizations;
     } catch (error) {
       this.log.error(`Error fetching customizations: ${error instanceof Error ? error.message : String(error)}`);
@@ -832,6 +832,7 @@ export class ValetudoClient {
           let data = '';
 
           if (res.statusCode !== 200) {
+            res.resume(); // Drain response to free the socket
             const error = new Error(`HTTP GET failed with status code: ${res.statusCode} for ${url}`);
             this.log.error(error.message);
             reject(error);
@@ -906,6 +907,7 @@ export class ValetudoClient {
         let data = '';
 
         if (res.statusCode !== 200) {
+          res.resume(); // Drain response to free the socket
           const error = new Error(`HTTP PUT failed with status code: ${res.statusCode} for ${url}`);
           this.log.error(error.message);
           reject(error);
