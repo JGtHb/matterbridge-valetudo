@@ -231,14 +231,16 @@
               "properties": {
                 "fanSpeed": {
                   "title": "Fan Speed",
-                  "description": "e.g., 'low', 'medium', 'high', 'max'",
+                  "description": "Fan speed preset for vacuum modes",
                   "type": "string",
+                  "enum": ["min", "low", "medium", "high", "max", "turbo", "custom"],
                   "default": "medium"
                 },
                 "waterUsage": {
                   "title": "Water Usage",
-                  "description": "For mop modes: 'min', 'low', 'medium', 'high', 'max'",
+                  "description": "Water usage preset for mop modes",
                   "type": "string",
+                  "enum": ["min", "low", "medium", "high", "max", "turbo", "custom"],
                   "default": "medium"
                 },
                 "matterModeTag": {
