@@ -512,6 +512,13 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       };
 
       const config = this.config as {
+        modeOverrides?: Array<{
+          operationMode: ValetudoOperationMode;
+          intensity: PresetLevel;
+          fanSpeed?: PresetLevel;
+          waterUsage?: PresetLevel;
+        }>;
+        // Deprecated: old customTags format, kept for backward compatibility
         customTags?: Array<{
           operationModes: Array<ValetudoOperationMode>;
           mappings: Array<{
@@ -557,21 +564,39 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         }
       }
 
-      // Apply custom tag overrides
+      // Apply mode overrides: user can customize what presets are applied for each mode
+      if (config.modeOverrides && config.modeOverrides.length > 0) {
+        for (const override of config.modeOverrides) {
+          if (!validOperationModes.has(override.operationMode)) {
+            this.log.warn(`  modeOverrides: skipping unknown operation mode "${override.operationMode}"`);
+            continue;
+          }
+          const matterTag = defaultPresetToTagMap[override.intensity];
+          if (matterTag === undefined) {
+            this.log.warn(`  modeOverrides: skipping unknown intensity "${override.intensity}"`);
+            continue;
+          }
+          this.log.info(`  modeOverrides: ${override.operationMode} @ ${override.intensity} → fan=${override.fanSpeed ?? 'default'}, water=${override.waterUsage ?? 'default'}`);
+
+          // Get existing defaults and merge overrides on top
+          const existing = tagPresetMap[override.operationMode].get(matterTag) ?? {};
+          tagPresetMap[override.operationMode].set(matterTag, {
+            fanSpeed: override.fanSpeed ?? existing.fanSpeed,
+            waterUsage: override.waterUsage ?? existing.waterUsage,
+          });
+        }
+      }
+
+      // Backward compatibility: support deprecated customTags format
       if (config.customTags && config.customTags.length > 0) {
+        this.log.warn('DEPRECATED: "customTags" config is replaced by "modeOverrides". Please update your configuration.');
         for (const tagGroup of config.customTags) {
           const selectedModes = tagGroup.operationModes || [];
           const mappings = tagGroup.mappings || [];
           for (const opMode of selectedModes) {
-            if (!validOperationModes.has(opMode)) {
-              this.log.warn(`  customTags: skipping unknown operation mode "${opMode}"`);
-              continue;
-            }
+            if (!validOperationModes.has(opMode)) continue;
             for (const mapping of mappings) {
-              if (typeof mapping.matterModeTag !== 'number') {
-                this.log.warn(`  customTags: skipping mapping with invalid matterModeTag: ${JSON.stringify(mapping.matterModeTag)}`);
-                continue;
-              }
+              if (typeof mapping.matterModeTag !== 'number') continue;
               tagPresetMap[opMode].set(mapping.matterModeTag, {
                 fanSpeed: mapping.fanSpeed,
                 waterUsage: mapping.waterUsage,
