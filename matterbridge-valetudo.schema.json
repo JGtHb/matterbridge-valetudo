@@ -246,9 +246,17 @@
           },
           "intensity": {
             "title": "Intensity",
-            "description": "Which intensity level to override (as shown in your controller: Min, Quiet/Low, Auto/Medium, Quick/High, Max, Deep Clean/Turbo, Custom)",
+            "description": "Which intensity level to override, as shown in your smart home controller",
             "type": "string",
-            "enum": ["min", "low", "medium", "high", "max", "turbo", "custom"]
+            "oneOf": [
+              { "const": "Min", "title": "Min" },
+              { "const": "Quiet", "title": "Quiet (default for 'low')" },
+              { "const": "Auto", "title": "Auto (default for 'medium')" },
+              { "const": "Quick", "title": "Quick (default for 'high')" },
+              { "const": "Max", "title": "Max" },
+              { "const": "DeepClean", "title": "Deep Clean (default for 'turbo')" },
+              { "const": "LowNoise", "title": "Custom / Low Noise" }
+            ]
           },
           "fanSpeed": {
             "title": "Fan Speed",

@@ -504,6 +504,18 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         custom: RvcCleanMode.ModeTag.LowNoise,
       };
 
+      // Matter intensity labels (as shown in the user's smart home controller) → Matter tags
+      // Used for intensityOverrides config where users pick labels they see in their controller
+      const matterLabelToTag: Record<string, RvcCleanMode.ModeTag> = {
+        Min: RvcCleanMode.ModeTag.Min,
+        Quiet: RvcCleanMode.ModeTag.Quiet,
+        Auto: RvcCleanMode.ModeTag.Auto,
+        Quick: RvcCleanMode.ModeTag.Quick,
+        Max: RvcCleanMode.ModeTag.Max,
+        DeepClean: RvcCleanMode.ModeTag.DeepClean,
+        LowNoise: RvcCleanMode.ModeTag.LowNoise,
+      };
+
       const config = this.config as {
         operationModeMapping?: {
           vacuum?: ValetudoOperationMode;
@@ -512,7 +524,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         };
         intensityOverrides?: Array<{
           category?: 'vacuum' | 'mop' | 'vacuumAndMop';
-          intensity: PresetLevel;
+          intensity: 'Min' | 'Quiet' | 'Auto' | 'Quick' | 'Max' | 'DeepClean' | 'LowNoise';
           fanSpeed?: PresetLevel;
           waterUsage?: PresetLevel;
         }>;
@@ -602,11 +614,13 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       }
 
       // Apply intensity overrides
+      // The intensity field uses Matter labels (Min, Quiet, Auto, Quick, Max, DeepClean, LowNoise)
+      // which map to what the user sees in their smart home controller
       if (config.intensityOverrides && config.intensityOverrides.length > 0) {
         for (const override of config.intensityOverrides) {
-          const matterTag = defaultPresetToTagMap[override.intensity];
+          const matterTag = matterLabelToTag[override.intensity];
           if (matterTag === undefined) {
-            this.log.warn(`  intensityOverrides: skipping unknown intensity "${override.intensity}"`);
+            this.log.warn(`  intensityOverrides: skipping unknown intensity "${override.intensity}". Valid values: ${Object.keys(matterLabelToTag).join(', ')}`);
             continue;
           }
 
