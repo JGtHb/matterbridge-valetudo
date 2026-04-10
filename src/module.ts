@@ -126,7 +126,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     }
 
     if (config.modeMapping) {
-      this.log.warn('DEPRECATED: "modeMapping" config is no longer supported and will be ignored.');
+      this.log.warn('DEPRECATED: "modeMapping" is replaced by "operationModeMapping". Please update your configuration.');
       this.log.warn('  Use "customTags" instead to define per-operation-mode preset mappings.');
       this.log.warn('  See README for the new configuration format.');
     }
@@ -494,13 +494,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         vacuum.currentOperationMode = operatingModes[0] as ValetudoOperationMode;
       }
 
-      const valetudoToMatterTags: Record<ValetudoOperationMode, RvcCleanMode.ModeTag[]> = {
-        vacuum: [RvcCleanMode.ModeTag.Vacuum],
-        mop: [RvcCleanMode.ModeTag.Mop],
-        vacuum_and_mop: [RvcCleanMode.ModeTag.Vacuum, RvcCleanMode.ModeTag.Mop],
-        vacuum_then_mop: [RvcCleanMode.ModeTag.VacuumThenMop],
-      };
-
       const defaultPresetToTagMap: Record<string, RvcCleanMode.ModeTag> = {
         min: RvcCleanMode.ModeTag.Min,
         low: RvcCleanMode.ModeTag.Quiet,
@@ -512,13 +505,18 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       };
 
       const config = this.config as {
-        modeOverrides?: Array<{
-          operationMode: ValetudoOperationMode;
+        operationModeMapping?: {
+          vacuum?: ValetudoOperationMode;
+          mop?: ValetudoOperationMode;
+          vacuumAndMop?: ValetudoOperationMode;
+        };
+        intensityOverrides?: Array<{
+          category?: 'vacuum' | 'mop' | 'vacuumAndMop';
           intensity: PresetLevel;
           fanSpeed?: PresetLevel;
           waterUsage?: PresetLevel;
         }>;
-        // Deprecated: old customTags format, kept for backward compatibility
+        // Deprecated: old formats, kept for backward compatibility
         customTags?: Array<{
           operationModes: Array<ValetudoOperationMode>;
           mappings: Array<{
@@ -527,36 +525,75 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
             matterModeTag: RvcCleanMode.ModeTag;
           }>;
         }>;
+        modeOverrides?: Array<{
+          operationMode: ValetudoOperationMode;
+          intensity: PresetLevel;
+          fanSpeed?: PresetLevel;
+          waterUsage?: PresetLevel;
+        }>;
       };
 
-      // Build per-operation-mode tag→preset mappings
-      const tagPresetMap: Record<ValetudoOperationMode, Map<RvcCleanMode.ModeTag, { fanSpeed?: PresetLevel; waterUsage?: PresetLevel }>> = {
+      // Matter categories → Matter tags + Valetudo operation mode
+      // The user can remap which Valetudo operation runs for each Matter category
+      type MatterCategory = 'vacuum' | 'mop' | 'vacuumAndMop';
+      const categoryConfig: Record<MatterCategory, { matterTags: RvcCleanMode.ModeTag[]; valetudoMode: ValetudoOperationMode; label: string }> = {
+        vacuum: {
+          matterTags: [RvcCleanMode.ModeTag.Vacuum],
+          valetudoMode: config.operationModeMapping?.vacuum ?? 'vacuum',
+          label: 'Vacuum',
+        },
+        mop: {
+          matterTags: [RvcCleanMode.ModeTag.Mop],
+          valetudoMode: config.operationModeMapping?.mop ?? 'mop',
+          label: 'Mop',
+        },
+        vacuumAndMop: {
+          matterTags: [RvcCleanMode.ModeTag.Vacuum, RvcCleanMode.ModeTag.Mop],
+          valetudoMode: config.operationModeMapping?.vacuumAndMop ?? 'vacuum_and_mop',
+          label: 'Vacuum And Mop',
+        },
+      };
+
+      // Log any custom operation mode mappings
+      if (config.operationModeMapping) {
+        for (const [cat, catConfig] of Object.entries(categoryConfig)) {
+          const defaultMode = cat === 'vacuumAndMop' ? 'vacuum_and_mop' : cat;
+          if (catConfig.valetudoMode !== defaultMode) {
+            this.log.info(`  operationModeMapping: ${catConfig.label} → Valetudo '${catConfig.valetudoMode}'`);
+          }
+        }
+      }
+
+      // Build per-category intensity mappings
+      // Each category maps Matter intensity tags → { fanSpeed, waterUsage } to send to Valetudo
+      const categoryPresetMap: Record<MatterCategory, Map<RvcCleanMode.ModeTag, { fanSpeed?: PresetLevel; waterUsage?: PresetLevel }>> = {
         vacuum: new Map(),
         mop: new Map(),
-        vacuum_and_mop: new Map(),
-        vacuum_then_mop: new Map(),
+        vacuumAndMop: new Map(),
       };
-      const validOperationModes = new Set<string>(Object.keys(tagPresetMap));
 
-      for (const opMode of operatingModes) {
-        if (!validOperationModes.has(opMode)) {
-          this.log.warn(`  Skipping unknown operation mode from API: "${opMode}"`);
-          continue;
-        }
-        if (opMode === 'vacuum' && vacuum.fanSpeedPresets) {
+      // Determine which categories are available based on the vacuum's capabilities
+      const availableCategories: MatterCategory[] = [];
+      for (const [category, catConfig] of Object.entries(categoryConfig) as Array<[MatterCategory, (typeof categoryConfig)[MatterCategory]]>) {
+        // A category is available if the vacuum supports its mapped Valetudo operation mode
+        if (!operatingModes.includes(catConfig.valetudoMode)) continue;
+        availableCategories.push(category);
+
+        // Build default intensity mappings for this category
+        if (category === 'vacuum' && vacuum.fanSpeedPresets) {
           vacuum.fanSpeedPresets.forEach((preset) => {
-            tagPresetMap[opMode].set(defaultPresetToTagMap[preset], { fanSpeed: preset });
+            categoryPresetMap[category].set(defaultPresetToTagMap[preset], { fanSpeed: preset });
           });
-        } else if (opMode === 'mop' && vacuum.waterUsagePresets) {
+        } else if (category === 'mop' && vacuum.waterUsagePresets) {
           vacuum.waterUsagePresets.forEach((preset) => {
-            tagPresetMap[opMode].set(defaultPresetToTagMap[preset], { waterUsage: preset });
+            categoryPresetMap[category].set(defaultPresetToTagMap[preset], { waterUsage: preset });
           });
-        } else if ((opMode === 'vacuum_and_mop' || opMode === 'vacuum_then_mop') && vacuum.fanSpeedPresets && vacuum.waterUsagePresets) {
+        } else if (category === 'vacuumAndMop' && vacuum.fanSpeedPresets && vacuum.waterUsagePresets) {
           const nFanSpeeds = vacuum.fanSpeedPresets.length;
           const nWaterLevels = vacuum.waterUsagePresets.length;
           const drivingPreset = nFanSpeeds > nWaterLevels ? vacuum.fanSpeedPresets : vacuum.waterUsagePresets;
           for (let i = 0; i < drivingPreset.length; i++) {
-            tagPresetMap[opMode].set(defaultPresetToTagMap[drivingPreset[i]], {
+            categoryPresetMap[category].set(defaultPresetToTagMap[drivingPreset[i]], {
               fanSpeed: vacuum.fanSpeedPresets[i] ?? vacuum.fanSpeedPresets[nFanSpeeds - 1],
               waterUsage: vacuum.waterUsagePresets[i] ?? vacuum.waterUsagePresets[nWaterLevels - 1],
             });
@@ -564,71 +601,52 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         }
       }
 
-      // Apply mode overrides: user can customize what presets are applied for each mode
-      if (config.modeOverrides && config.modeOverrides.length > 0) {
-        for (const override of config.modeOverrides) {
-          if (!validOperationModes.has(override.operationMode)) {
-            this.log.warn(`  modeOverrides: skipping unknown operation mode "${override.operationMode}"`);
-            continue;
-          }
+      // Apply intensity overrides
+      if (config.intensityOverrides && config.intensityOverrides.length > 0) {
+        for (const override of config.intensityOverrides) {
           const matterTag = defaultPresetToTagMap[override.intensity];
           if (matterTag === undefined) {
-            this.log.warn(`  modeOverrides: skipping unknown intensity "${override.intensity}"`);
+            this.log.warn(`  intensityOverrides: skipping unknown intensity "${override.intensity}"`);
             continue;
           }
-          this.log.info(`  modeOverrides: ${override.operationMode} @ ${override.intensity} → fan=${override.fanSpeed ?? 'default'}, water=${override.waterUsage ?? 'default'}`);
 
-          // Get existing defaults and merge overrides on top
-          const existing = tagPresetMap[override.operationMode].get(matterTag) ?? {};
-          tagPresetMap[override.operationMode].set(matterTag, {
-            fanSpeed: override.fanSpeed ?? existing.fanSpeed,
-            waterUsage: override.waterUsage ?? existing.waterUsage,
-          });
-        }
-      }
-
-      // Backward compatibility: support deprecated customTags format
-      if (config.customTags && config.customTags.length > 0) {
-        this.log.warn('DEPRECATED: "customTags" config is replaced by "modeOverrides". Please update your configuration.');
-        for (const tagGroup of config.customTags) {
-          const selectedModes = tagGroup.operationModes || [];
-          const mappings = tagGroup.mappings || [];
-          for (const opMode of selectedModes) {
-            if (!validOperationModes.has(opMode)) continue;
-            for (const mapping of mappings) {
-              if (typeof mapping.matterModeTag !== 'number') continue;
-              tagPresetMap[opMode].set(mapping.matterModeTag, {
-                fanSpeed: mapping.fanSpeed,
-                waterUsage: mapping.waterUsage,
-              });
-            }
+          // Apply to specific category or all categories
+          const targetCategories: MatterCategory[] = override.category ? [override.category] : availableCategories;
+          for (const cat of targetCategories) {
+            const existing = categoryPresetMap[cat].get(matterTag) ?? {};
+            categoryPresetMap[cat].set(matterTag, {
+              fanSpeed: override.fanSpeed ?? existing.fanSpeed,
+              waterUsage: override.waterUsage ?? existing.waterUsage,
+            });
+            this.log.info(`  intensityOverrides: ${categoryConfig[cat].label} @ ${override.intensity} → fan=${override.fanSpeed ?? 'default'}, water=${override.waterUsage ?? 'default'}`);
           }
         }
       }
 
-      const formatLabel = (opMode: ValetudoOperationMode, intensityTag?: RvcCleanMode.ModeTag): string => {
-        const modeName = opMode
-          .split('_')
-          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-          .join(' ');
-        return intensityTag != undefined ? `${modeName} (${RvcCleanMode.ModeTag[intensityTag]})` : modeName;
-      };
+      // Backward compatibility: support deprecated customTags and modeOverrides formats
+      if (config.customTags && config.customTags.length > 0) {
+        this.log.warn('DEPRECATED: "customTags" config is replaced by "operationModeMapping" and "intensityOverrides". Please update your configuration.');
+      }
+      if (config.modeOverrides && config.modeOverrides.length > 0) {
+        this.log.warn('DEPRECATED: "modeOverrides" config is replaced by "intensityOverrides". Please update your configuration.');
+      }
 
-      // Create modes: one per (operation mode × intensity preset)
+      // Create modes: one per (Matter category × intensity)
       let modeId = RvcCleanModeBase;
-      for (const [opModeStr, tagMap] of Object.entries(tagPresetMap)) {
-        const opMode = opModeStr as ValetudoOperationMode;
-        const opBaseTags = valetudoToMatterTags[opMode];
-        for (const [matterMode, presets] of tagMap) {
-          this.log.debug(`Building mode: ${opMode} × ${RvcCleanMode.ModeTag[matterMode]} → ID ${modeId}`);
+      for (const category of availableCategories) {
+        const catConfig = categoryConfig[category];
+        const tagMap = categoryPresetMap[category];
+        for (const [matterTag, presets] of tagMap) {
+          const label = `${catConfig.label} (${RvcCleanMode.ModeTag[matterTag]})`;
+          this.log.debug(`Building mode: ${label} → ID ${modeId}, valetudo=${catConfig.valetudoMode}`);
           supportedCleanModes.push({
-            label: formatLabel(opMode, matterMode),
+            label,
             mode: modeId,
-            modeTags: [...opBaseTags.map((tag) => ({ value: tag })), { value: matterMode }],
+            modeTags: [...catConfig.matterTags.map((tag) => ({ value: tag })), { value: matterTag }],
           });
           vacuum.modeMap.set(modeId, {
             presetLevel: presets.fanSpeed || presets.waterUsage,
-            setOperationMode: opMode,
+            setOperationMode: catConfig.valetudoMode,
           });
           modeId++;
         }
@@ -639,28 +657,31 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       // in the supported modes list, and Matter.js validates this during initialization before
       // the plugin can intervene.
       // v1.0.7 mode IDs: VacuumMop 5-9 (overlap with new), Mop 31-34, Vacuum 66-70
-      const legacyBaseTags = [{ value: RvcCleanMode.ModeTag.Vacuum }]; // fallback tag for legacy entries
-      const legacyModes: Array<{ id: number; label: string; preset: PresetLevel; opMode: ValetudoOperationMode }> = [
-        { id: 31, label: 'Mop Auto (Legacy)', preset: 'medium', opMode: 'mop' },
-        { id: 32, label: 'Mop Low (Legacy)', preset: 'low', opMode: 'mop' },
-        { id: 33, label: 'Mop Quick (Legacy)', preset: 'high', opMode: 'mop' },
-        { id: 34, label: 'Mop Max (Legacy)', preset: 'max', opMode: 'mop' },
-        { id: 66, label: 'Vacuum Low (Legacy)', preset: 'low', opMode: 'vacuum' },
-        { id: 67, label: 'Vacuum Auto (Legacy)', preset: 'medium', opMode: 'vacuum' },
-        { id: 68, label: 'Vacuum Quick (Legacy)', preset: 'high', opMode: 'vacuum' },
-        { id: 69, label: 'Vacuum Max (Legacy)', preset: 'max', opMode: 'vacuum' },
-        { id: 70, label: 'Vacuum Turbo (Legacy)', preset: 'turbo', opMode: 'vacuum' },
+      const legacyTagMap: Record<string, RvcCleanMode.ModeTag[]> = {
+        vacuum: [RvcCleanMode.ModeTag.Vacuum],
+        mop: [RvcCleanMode.ModeTag.Mop],
+      };
+      const legacyModes: Array<{ id: number; label: string; preset: PresetLevel; category: string; valetudoMode: ValetudoOperationMode }> = [
+        { id: 31, label: 'Mop Auto (Legacy)', preset: 'medium', category: 'mop', valetudoMode: 'mop' },
+        { id: 32, label: 'Mop Low (Legacy)', preset: 'low', category: 'mop', valetudoMode: 'mop' },
+        { id: 33, label: 'Mop Quick (Legacy)', preset: 'high', category: 'mop', valetudoMode: 'mop' },
+        { id: 34, label: 'Mop Max (Legacy)', preset: 'max', category: 'mop', valetudoMode: 'mop' },
+        { id: 66, label: 'Vacuum Low (Legacy)', preset: 'low', category: 'vacuum', valetudoMode: 'vacuum' },
+        { id: 67, label: 'Vacuum Auto (Legacy)', preset: 'medium', category: 'vacuum', valetudoMode: 'vacuum' },
+        { id: 68, label: 'Vacuum Quick (Legacy)', preset: 'high', category: 'vacuum', valetudoMode: 'vacuum' },
+        { id: 69, label: 'Vacuum Max (Legacy)', preset: 'max', category: 'vacuum', valetudoMode: 'vacuum' },
+        { id: 70, label: 'Vacuum Turbo (Legacy)', preset: 'turbo', category: 'vacuum', valetudoMode: 'vacuum' },
       ];
       for (const legacy of legacyModes) {
         // Skip if this ID is already used by a real mode
         if (vacuum.modeMap.has(legacy.id)) continue;
-        const legacyOpTags = valetudoToMatterTags[legacy.opMode] || legacyBaseTags;
+        const legacyOpTags = legacyTagMap[legacy.category] || [RvcCleanMode.ModeTag.Vacuum];
         supportedCleanModes.push({
           label: legacy.label,
           mode: legacy.id,
           modeTags: [...legacyOpTags.map((tag) => ({ value: tag })), { value: defaultPresetToTagMap[legacy.preset] }],
         });
-        vacuum.modeMap.set(legacy.id, { presetLevel: legacy.preset, setOperationMode: legacy.opMode, isLegacy: true });
+        vacuum.modeMap.set(legacy.id, { presetLevel: legacy.preset, setOperationMode: legacy.valetudoMode, isLegacy: true });
       }
 
       if (supportedCleanModes.length === 0) {

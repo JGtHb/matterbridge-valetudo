@@ -202,35 +202,63 @@
         }
       }
     },
-    "modeOverrides": {
-      "title": "Clean Mode Overrides",
-      "description": "Customize what the vacuum does when a specific clean mode is selected in your smart home controller. By default, each intensity level maps directly to the matching Valetudo preset (e.g. Quick → fan speed 'high'). Use this to change that behavior.",
+    "operationModeMapping": {
+      "title": "Operation Mode Mapping",
+      "description": "Map each Matter cleaning category (as shown in your controller) to a Valetudo operation mode. Useful if your vacuum supports 'vacuum_then_mop' and you want it under the 'Vacuum & Mop' category.",
+      "type": "object",
+      "properties": {
+        "vacuum": {
+          "title": "Vacuum",
+          "description": "Valetudo mode to use for the Vacuum category (default: vacuum)",
+          "type": "string",
+          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
+          "default": "vacuum"
+        },
+        "mop": {
+          "title": "Mop",
+          "description": "Valetudo mode to use for the Mop category (default: mop)",
+          "type": "string",
+          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
+          "default": "mop"
+        },
+        "vacuumAndMop": {
+          "title": "Vacuum & Mop",
+          "description": "Valetudo mode to use for the Vacuum & Mop category (default: vacuum_and_mop)",
+          "type": "string",
+          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
+          "default": "vacuum_and_mop"
+        }
+      }
+    },
+    "intensityOverrides": {
+      "title": "Intensity Overrides",
+      "description": "Override the fan speed or water usage for specific intensity levels. By default, each intensity maps to its matching Valetudo preset (e.g. Quick → fan 'high'). Use this to change that.",
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["operationMode", "intensity"],
+        "required": ["intensity"],
         "properties": {
-          "operationMode": {
-            "title": "Operation Mode",
-            "description": "Which cleaning category to override",
+          "category": {
+            "title": "Category",
+            "description": "Which Matter category to override (leave empty to apply to all categories)",
             "type": "string",
-            "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"]
+            "enum": ["vacuum", "mop", "vacuumAndMop"]
           },
           "intensity": {
-            "title": "Intensity Level",
-            "description": "Which intensity level to override (as shown in your controller)",
+            "title": "Intensity",
+            "description": "Which intensity level to override (as shown in your controller: Min, Quiet/Low, Auto/Medium, Quick/High, Max, Deep Clean/Turbo, Custom)",
             "type": "string",
             "enum": ["min", "low", "medium", "high", "max", "turbo", "custom"]
           },
           "fanSpeed": {
-            "title": "Fan Speed Override",
-            "description": "Fan speed to send to the vacuum (leave empty to keep default)",
+            "title": "Fan Speed",
+            "description": "Fan speed to send to the vacuum",
             "type": "string",
             "enum": ["min", "low", "medium", "high", "max", "turbo", "custom"]
           },
           "waterUsage": {
-            "title": "Water Usage Override",
-            "description": "Water usage to send to the vacuum (leave empty to keep default)",
+            "title": "Water Usage",
+            "description": "Water usage to send to the vacuum",
             "type": "string",
             "enum": ["min", "low", "medium", "high", "max", "turbo", "custom"]
           }
