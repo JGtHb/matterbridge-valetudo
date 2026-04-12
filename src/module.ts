@@ -666,11 +666,21 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         }
       }
 
-      // Legacy v1.0.7 compatibility: add mode IDs that may be persisted from previous versions.
-      // Without these, upgrading from v1.0.7 crashes because the persisted currentMode is not
-      // in the supported modes list, and Matter.js validates this during initialization before
-      // the plugin can intervene.
-      // v1.0.7 mode IDs: VacuumMop 5-9 (overlap with new), Mop 31-34, Vacuum 66-70
+      // Legacy v1.0.7 compatibility mode IDs.
+      //
+      // Why these exist: Matter.js persists the current rvcCleanMode mode ID. When the plugin
+      // restarts, Matter.js validates the persisted currentMode against supportedModes BEFORE
+      // the plugin can intervene. v1.0.8 renumbered all modes (starting from RvcCleanModeBase),
+      // so a vacuum that was last set to e.g. mode 70 ("Vacuum Turbo" in v1.0.7) would fail
+      // validation and crash on startup. These ghost entries keep the old IDs valid.
+      //
+      // Important: legacy modes share the same Matter intensity tags (DeepClean, Quick, etc.)
+      // as real modes. Controllers like Apple Home may select a legacy mode instead of the real
+      // one when both have the same tag. To handle this, legacy modes inherit any intensity
+      // overrides from categoryPresetMap so they behave identically to their real counterparts.
+      //
+      // These can be removed once enough upgrade cycles have passed that no persisted state
+      // references the old IDs (v1.0.7 IDs: VacuumMop 5-9, Mop 31-34, Vacuum 66-70).
       const legacyTagMap: Record<string, RvcCleanMode.ModeTag[]> = {
         vacuum: [RvcCleanMode.ModeTag.Vacuum],
         mop: [RvcCleanMode.ModeTag.Mop],
@@ -690,12 +700,21 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         // Skip if this ID is already used by a real mode
         if (vacuum.modeMap.has(legacy.id)) continue;
         const legacyOpTags = legacyTagMap[legacy.category] || [RvcCleanMode.ModeTag.Vacuum];
+        // Inherit overridden presets from categoryPresetMap so intensity overrides
+        // apply to legacy modes too (Apple Home may pick a legacy mode over the real one
+        // when both share the same intensity tag)
+        const legacyTag = defaultPresetToTagMap[legacy.preset];
+        const legacyCat = legacy.category as MatterCategory;
+        const overriddenPresets = categoryPresetMap[legacyCat]?.get(legacyTag);
+        const effectivePreset = overriddenPresets
+          ? (overriddenPresets.fanSpeed || overriddenPresets.waterUsage || legacy.preset)
+          : legacy.preset;
         supportedCleanModes.push({
           label: legacy.label,
           mode: legacy.id,
-          modeTags: [...legacyOpTags.map((tag) => ({ value: tag })), { value: defaultPresetToTagMap[legacy.preset] }],
+          modeTags: [...legacyOpTags.map((tag) => ({ value: tag })), { value: legacyTag }],
         });
-        vacuum.modeMap.set(legacy.id, { presetLevel: legacy.preset, setOperationMode: legacy.valetudoMode, isLegacy: true });
+        vacuum.modeMap.set(legacy.id, { presetLevel: effectivePreset, setOperationMode: legacy.valetudoMode, isLegacy: true });
       }
 
       if (supportedCleanModes.length === 0) {
