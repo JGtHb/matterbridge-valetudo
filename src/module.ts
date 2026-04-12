@@ -642,7 +642,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
               fanSpeed: override.fanSpeed ?? existing.fanSpeed,
               waterUsage: override.waterUsage ?? existing.waterUsage,
             });
-            this.log.info(`  intensityOverrides: ${categoryConfig[cat].label} @ ${override.intensity} → fan=${override.fanSpeed ?? 'default'}, water=${override.waterUsage ?? 'default'}`);
+            this.log.info(
+              `  intensityOverrides: ${categoryConfig[cat].label} @ ${override.intensity} → fan=${override.fanSpeed ?? 'default'}, water=${override.waterUsage ?? 'default'}`,
+            );
           }
         }
       }
@@ -716,9 +718,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         const legacyTag = defaultPresetToTagMap[legacy.preset];
         const legacyCat = legacy.category as MatterCategory;
         const overriddenPresets = categoryPresetMap[legacyCat]?.get(legacyTag);
-        const effectivePreset = overriddenPresets
-          ? (overriddenPresets.fanSpeed || overriddenPresets.waterUsage || legacy.preset)
-          : legacy.preset;
+        const effectivePreset = overriddenPresets ? overriddenPresets.fanSpeed || overriddenPresets.waterUsage || legacy.preset : legacy.preset;
         supportedCleanModes.push({
           label: legacy.label,
           mode: legacy.id,
@@ -737,7 +737,12 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       }
       const realModes = supportedCleanModes.filter((m) => !vacuum.modeMap.get(m.mode)?.isLegacy);
       this.log.info(`  Clean modes (${realModes.length}): ${realModes.map((m) => `${m.label}(${m.mode})`).join(', ')}`);
-      this.log.debug(`  Legacy compat modes: ${supportedCleanModes.filter((m) => vacuum.modeMap.get(m.mode)?.isLegacy).map((m) => `${m.label}(${m.mode})`).join(', ')}`);
+      this.log.debug(
+        `  Legacy compat modes: ${supportedCleanModes
+          .filter((m) => vacuum.modeMap.get(m.mode)?.isLegacy)
+          .map((m) => `${m.label}(${m.mode})`)
+          .join(', ')}`,
+      );
       this.log.debug(`Supported clean modes: ${JSON.stringify(supportedCleanModes)}`);
 
       // Create Matter device
@@ -873,7 +878,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
     // Change mode command (handles both run mode and clean mode)
     vacuum.device.addCommandHandler('changeToMode', async (data: { request: Record<string, unknown> }) => {
-      this.log.info(`[${vacuum.name}] changeToMode called: ${JSON.stringify(data, (_, v) => typeof v === 'bigint' ? Number(v) : v)}`);
+      this.log.info(`[${vacuum.name}] changeToMode called: ${JSON.stringify(data, (_, v) => (typeof v === 'bigint' ? Number(v) : v))}`);
 
       const request = data.request as { newMode: number };
       const isRunMode = request.newMode >= 1 && request.newMode <= 3;
@@ -935,7 +940,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
               const waterPreset = vacuum.waterUsagePresets?.includes(presetLevel) ? presetLevel : vacuum.waterUsagePresets?.[vacuum.waterUsagePresets.length - 1];
               if (waterPreset) {
                 if (waterPreset !== presetLevel) {
-                  this.log.warn(`[${vacuum.name}] Water usage '${presetLevel}' not supported, falling back to '${waterPreset}'. Available: ${vacuum.waterUsagePresets?.join(', ')}`);
+                  this.log.warn(
+                    `[${vacuum.name}] Water usage '${presetLevel}' not supported, falling back to '${waterPreset}'. Available: ${vacuum.waterUsagePresets?.join(', ')}`,
+                  );
                 }
                 this.log.info(`[${vacuum.name}] Setting water '${waterPreset}'`);
                 await vacuum.client.setWaterUsage(waterPreset);
@@ -966,7 +973,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
     // Select areas command
     vacuum.device.addCommandHandler('selectAreas', async (data: { request: Record<string, unknown> }) => {
-      this.log.info(`[${vacuum.name}] selectAreas called: ${JSON.stringify(data, (_, v) => typeof v === 'bigint' ? Number(v) : v)}`);
+      this.log.info(`[${vacuum.name}] selectAreas called: ${JSON.stringify(data, (_, v) => (typeof v === 'bigint' ? Number(v) : v))}`);
 
       const request = data.request as { newAreas?: number[] };
 
@@ -1141,9 +1148,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   private syncOperationModeFromAttributes(vacuum: VacuumInstance, attributes: Array<{ __class: string; type?: string; value?: unknown }>): void {
     if (!vacuum.capabilities.includes('OperationModeControlCapability')) return;
 
-    const opModeAttr = attributes.find((attr) => attr.__class === 'PresetSelectionStateAttribute' && attr.type === 'operation_mode') as
-      | { value: string }
-      | undefined;
+    const opModeAttr = attributes.find((attr) => attr.__class === 'PresetSelectionStateAttribute' && attr.type === 'operation_mode') as { value: string } | undefined;
 
     if (opModeAttr?.value) {
       const newOpMode = opModeAttr.value as ValetudoOperationMode;
