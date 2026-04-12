@@ -23,6 +23,11 @@ jobs:
           node-version: '22.x'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Update npm for Trusted Publishing
+        run: |
+          corepack disable 2>/dev/null || true
+          npx npm@latest install -g npm@latest
+
       - name: Verify versions
         run: node -v && npm -v
 
