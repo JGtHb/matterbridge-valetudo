@@ -480,12 +480,14 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         const presets = await vacuum.client.getFanSpeedPresets();
         if (presets) {
           vacuum.fanSpeedPresets = presets.filter((preset) => preset !== 'off');
+          this.log.info(`  Fan speed presets: ${vacuum.fanSpeedPresets.join(', ')}`);
         }
       }
       if (vacuum.capabilities.includes('WaterUsageControlCapability')) {
         const presets = await vacuum.client.getWaterUsagePresets();
         if (presets) {
           vacuum.waterUsagePresets = presets.filter((preset) => preset !== 'off');
+          this.log.info(`  Water usage presets: ${vacuum.waterUsagePresets.join(', ')}`);
         }
       }
 
@@ -622,6 +624,14 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
           if (matterTag === undefined) {
             this.log.warn(`  intensityOverrides: skipping unknown intensity "${override.intensity}". Valid values: ${Object.keys(matterLabelToTag).join(', ')}`);
             continue;
+          }
+
+          // Validate presets against what the vacuum actually supports
+          if (override.fanSpeed && vacuum.fanSpeedPresets && !vacuum.fanSpeedPresets.includes(override.fanSpeed)) {
+            this.log.warn(`  intensityOverrides: fan speed '${override.fanSpeed}' is not supported by this vacuum. Available: ${vacuum.fanSpeedPresets.join(', ')}`);
+          }
+          if (override.waterUsage && vacuum.waterUsagePresets && !vacuum.waterUsagePresets.includes(override.waterUsage)) {
+            this.log.warn(`  intensityOverrides: water usage '${override.waterUsage}' is not supported by this vacuum. Available: ${vacuum.waterUsagePresets.join(', ')}`);
           }
 
           // Apply to specific category or all categories
@@ -912,6 +922,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
             if (vacuum.capabilities.includes('FanSpeedControlCapability') && (opMode === 'vacuum' || opMode === 'vacuum_and_mop' || opMode === 'vacuum_then_mop')) {
               const fanPreset = vacuum.fanSpeedPresets?.includes(presetLevel) ? presetLevel : vacuum.fanSpeedPresets?.[vacuum.fanSpeedPresets.length - 1];
               if (fanPreset) {
+                if (fanPreset !== presetLevel) {
+                  this.log.warn(`[${vacuum.name}] Fan speed '${presetLevel}' not supported, falling back to '${fanPreset}'. Available: ${vacuum.fanSpeedPresets?.join(', ')}`);
+                }
                 this.log.info(`[${vacuum.name}] Setting fan '${fanPreset}'`);
                 await vacuum.client.setFanSpeed(fanPreset);
               }
@@ -921,6 +934,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
             if (vacuum.capabilities.includes('WaterUsageControlCapability') && (opMode === 'mop' || opMode === 'vacuum_and_mop')) {
               const waterPreset = vacuum.waterUsagePresets?.includes(presetLevel) ? presetLevel : vacuum.waterUsagePresets?.[vacuum.waterUsagePresets.length - 1];
               if (waterPreset) {
+                if (waterPreset !== presetLevel) {
+                  this.log.warn(`[${vacuum.name}] Water usage '${presetLevel}' not supported, falling back to '${waterPreset}'. Available: ${vacuum.waterUsagePresets?.join(', ')}`);
+                }
                 this.log.info(`[${vacuum.name}] Setting water '${waterPreset}'`);
                 await vacuum.client.setWaterUsage(waterPreset);
               }

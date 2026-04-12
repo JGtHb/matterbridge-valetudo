@@ -262,13 +262,13 @@
             "title": "Fan Speed",
             "description": "Fan speed to send to the vacuum",
             "type": "string",
-            "enum": ["min", "low", "medium", "high", "max", "turbo", "custom"]
+            "enum": ["low", "medium", "high", "max"]
           },
           "waterUsage": {
             "title": "Water Usage",
             "description": "Water usage to send to the vacuum",
             "type": "string",
-            "enum": ["min", "low", "medium", "high", "max", "turbo", "custom"]
+            "enum": ["min", "low", "medium", "high", "max"]
           }
         }
       }
