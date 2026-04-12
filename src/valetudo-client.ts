@@ -28,10 +28,17 @@ export interface ValetudoRobotInfo {
   implementation: string;
 }
 
+export interface ValetudoCustomizations {
+  friendlyName?: string;
+}
+
 export type BatteryFlag = 'none' | 'charging' | 'discharging' | 'charged';
 export type AttachmentType = 'dustbin' | 'watertank' | 'mop';
 export type PresetType = 'fan_speed' | 'water_grade' | 'operation_mode';
-export type PresetValue = 'off' | 'min' | 'low' | 'medium' | 'high' | 'max' | 'turbo' | 'custom' | 'vacuum' | 'mop' | 'vacuum_and_mop' | 'vacuum_then_mop';
+export type PresetLevel = 'off' | 'min' | 'low' | 'medium' | 'high' | 'max' | 'turbo' | 'custom';
+export type ValetudoOperationMode = 'vacuum' | 'mop' | 'vacuum_and_mop' | 'vacuum_then_mop';
+export type PresetValue = PresetLevel | ValetudoOperationMode;
+export type ConsumableUnit = 'percent' | 'minutes';
 
 export interface BatteryStateAttribute {
   __class: 'BatteryStateAttribute';
@@ -76,7 +83,7 @@ export interface MapSegment {
 
 export interface ConsumableRemaining {
   value: number;
-  unit: 'percent' | 'minutes';
+  unit: ConsumableUnit;
 }
 
 export interface ValetudoConsumable {
@@ -84,6 +91,13 @@ export interface ValetudoConsumable {
   type: string;
   subType: string;
   remaining: ConsumableRemaining;
+}
+
+export interface ConsumableProperties {
+  type: string;
+  subType: string;
+  unit: ConsumableUnit;
+  maxValue: number;
 }
 
 export interface ValetudoDataPoint {
@@ -210,6 +224,18 @@ export class ValetudoClient {
       return data as ValetudoInfo;
     } catch (error) {
       this.log.error(`Error fetching Valetudo info: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  async getCustomizations(): Promise<ValetudoCustomizations | null> {
+    try {
+      const url = `${this.baseUrl}/api/v2/valetudo/config/customizations`;
+      const data = await this.httpGet(url);
+      this.log.debug(`Customizations received: ${JSON.stringify(data)}`);
+      return data as ValetudoCustomizations;
+    } catch (error) {
+      this.log.error(`Error fetching customizations: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
   }
@@ -341,10 +367,10 @@ export class ValetudoClient {
   /**
    * Get available fan speed presets
    */
-  async getFanSpeedPresets(): Promise<string[] | null> {
+  async getFanSpeedPresets(): Promise<PresetLevel[] | null> {
     try {
       const data = await this.httpGet(`${this.baseUrl}/api/v2/robot/capabilities/FanSpeedControlCapability/presets`);
-      return data as string[];
+      return data as PresetLevel[];
     } catch (error) {
       this.log.error(`Error fetching fan speed presets: ${error instanceof Error ? error.message : String(error)}`);
       return null;
@@ -356,7 +382,7 @@ export class ValetudoClient {
    *
    * @param preset
    */
-  async setFanSpeed(preset: string): Promise<boolean> {
+  async setFanSpeed(preset: PresetLevel): Promise<boolean> {
     try {
       const result = await this.httpPut(`${this.baseUrl}/api/v2/robot/capabilities/FanSpeedControlCapability/preset`, {
         name: preset,
@@ -371,10 +397,10 @@ export class ValetudoClient {
   /**
    * Get available water usage presets
    */
-  async getWaterUsagePresets(): Promise<string[] | null> {
+  async getWaterUsagePresets(): Promise<PresetLevel[] | null> {
     try {
       const data = await this.httpGet(`${this.baseUrl}/api/v2/robot/capabilities/WaterUsageControlCapability/presets`);
-      return data as string[];
+      return data as PresetLevel[];
     } catch (error) {
       this.log.error(`Error fetching water usage presets: ${error instanceof Error ? error.message : String(error)}`);
       return null;
@@ -386,7 +412,7 @@ export class ValetudoClient {
    *
    * @param preset
    */
-  async setWaterUsage(preset: string): Promise<boolean> {
+  async setWaterUsage(preset: PresetLevel): Promise<boolean> {
     try {
       const result = await this.httpPut(`${this.baseUrl}/api/v2/robot/capabilities/WaterUsageControlCapability/preset`, {
         name: preset,
@@ -401,10 +427,10 @@ export class ValetudoClient {
   /**
    * Get available operation mode presets
    */
-  async getOperationModePresets(): Promise<string[] | null> {
+  async getOperationModePresets(): Promise<ValetudoOperationMode[] | null> {
     try {
       const data = await this.httpGet(`${this.baseUrl}/api/v2/robot/capabilities/OperationModeControlCapability/presets`);
-      return data as string[];
+      return data as ValetudoOperationMode[];
     } catch (error) {
       this.log.error(`Error fetching operation mode presets: ${error instanceof Error ? error.message : String(error)}`);
       return null;
@@ -416,7 +442,7 @@ export class ValetudoClient {
    *
    * @param preset
    */
-  async setOperationMode(preset: string): Promise<boolean> {
+  async setOperationMode(preset: ValetudoOperationMode): Promise<boolean> {
     try {
       const result = await this.httpPut(`${this.baseUrl}/api/v2/robot/capabilities/OperationModeControlCapability/preset`, {
         name: preset,
@@ -611,6 +637,19 @@ export class ValetudoClient {
     }
   }
 
+  /**
+   * Get consumables properties (max lifetime etc.)
+   */
+  async getConsumablesProperties(): Promise<ConsumableProperties[] | null> {
+    try {
+      const data = (await this.httpGet(`${this.baseUrl}/api/v2/robot/capabilities/ConsumableMonitoringCapability/properties`)) as { availableConsumables: ConsumableProperties[] };
+      return data.availableConsumables;
+    } catch (error) {
+      this.log.error(`Error fetching available consumables: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
   // ==========================================================================
   // HTTP Methods
   // ==========================================================================
@@ -637,6 +676,7 @@ export class ValetudoClient {
           let data = '';
 
           if (res.statusCode !== 200) {
+            res.resume(); // Drain response to free the socket
             const error = new Error(`HTTP GET failed with status code: ${res.statusCode} for ${url}`);
             this.log.error(error.message);
             reject(error);
@@ -711,6 +751,7 @@ export class ValetudoClient {
         let data = '';
 
         if (res.statusCode !== 200) {
+          res.resume(); // Drain response to free the socket
           const error = new Error(`HTTP PUT failed with status code: ${res.statusCode} for ${url}`);
           this.log.error(error.message);
           reject(error);
