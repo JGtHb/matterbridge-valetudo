@@ -1016,7 +1016,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     });
 
     // Change mode command (handles both run mode and clean mode)
-    vacuum.device.addCommandHandler('changeToMode', async (data: { request: Record<string, unknown> }) => {
+    vacuum.device.addCommandHandler('changeToMode', async (data) => {
       this.log.info(`[${vacuum.name}] changeToMode called: ${JSON.stringify(data, (_, v) => (typeof v === 'bigint' ? Number(v) : v))}`);
 
       const request = data.request as { newMode: number };
@@ -1114,7 +1114,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     });
 
     // Select areas command
-    vacuum.device.addCommandHandler('selectAreas', async (data: { request: Record<string, unknown> }) => {
+    vacuum.device.addCommandHandler('selectAreas', async (data) => {
       this.log.info(`[${vacuum.name}] selectAreas called: ${JSON.stringify(data, (_, v) => (typeof v === 'bigint' ? Number(v) : v))}`);
 
       const request = data.request as { newAreas?: number[] };
