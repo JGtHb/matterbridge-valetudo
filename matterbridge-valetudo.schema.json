@@ -90,6 +90,12 @@
       "type": "boolean",
       "default": false
     },
+    "dockAndEmptyButton": {
+      "title": "Dock & Empty Button",
+      "description": "Expose a switch that returns the robot to its dock and empties the dustbin (if supported). Useful for Apple Home automations, which cannot trigger return-to-dock natively.",
+      "type": "boolean",
+      "default": false
+    },
     "positionTracking": {
       "title": "Position Tracking",
       "description": "Track which room/area the vacuum is currently cleaning",

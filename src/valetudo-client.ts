@@ -447,6 +447,22 @@ export class ValetudoClient {
   }
 
   /**
+   * Manually trigger the auto-empty dock to empty the robot's dustbin.
+   * Requires the robot to be docked and to support AutoEmptyDockManualTriggerCapability.
+   */
+  async triggerAutoEmpty(): Promise<boolean> {
+    try {
+      const result = await this.httpPut(`${this.baseUrl}/api/v2/robot/capabilities/AutoEmptyDockManualTriggerCapability`, {
+        action: 'trigger',
+      });
+      return result !== null;
+    } catch (error) {
+      this.log.error(`Error triggering auto-empty: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
+  /**
    * Start mapping
    */
   async startMapping(): Promise<boolean> {

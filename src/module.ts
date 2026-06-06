@@ -7,7 +7,7 @@
  * @license Apache-2.0
  */
 
-import { MatterbridgeDynamicPlatform, PlatformConfig, MatterbridgeEndpoint, contactSensor } from 'matterbridge';
+import { MatterbridgeDynamicPlatform, PlatformConfig, MatterbridgeEndpoint, contactSensor, onOffOutlet } from 'matterbridge';
 import { RoboticVacuumCleaner } from 'matterbridge/devices';
 import { AnsiLogger, LogLevel } from 'matterbridge/logger';
 import { RvcCleanMode, RvcOperationalState, RvcRunMode } from 'matterbridge/matter/clusters';
@@ -51,6 +51,10 @@ interface VacuumInstance {
   consumableMap: Map<string, { endpoint?: MatterbridgeEndpoint; consumable: ValetudoConsumable; properties: ConsumableProperties; lastState?: boolean }>;
   mapLayersCache: CachedMapLayers | null;
   mapCacheValidUntil: number;
+
+  // Dock & Empty button state
+  docked: boolean; // whether the robot is currently on its dock (from state attributes)
+  pendingEmpty: boolean; // empty requested via the button; triggered once docked
 
   // Metadata
   source: 'mdns' | 'manual';
@@ -324,6 +328,8 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       consumableMap: new Map(),
       mapLayersCache: null,
       mapCacheValidUntil: 0,
+      docked: false,
+      pendingEmpty: false,
       source,
       lastSeen: Date.now(),
       online: true,
@@ -803,8 +809,73 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       // Set up consumables for this vacuum. Initial vacuum state (battery, status,
       // run mode) is populated by the SSE subscriptions set up in setupSubscriptions().
       await this.setupConsumablesForVacuum(vacuum);
+
+      // Optionally expose a "Dock & Empty" button for use in Apple Home automations
+      await this.setupDockEmptyButtonForVacuum(vacuum);
     } catch (error) {
       throw new Error(`Failed to create device: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Optionally expose a momentary On/Off accessory that returns the robot to its
+   * dock and (if supported) empties the dustbin. Apple Home cannot trigger
+   * "return to dock" in automations natively, so this surfaces it as a switch
+   * that automations can turn on.
+   */
+  private async setupDockEmptyButtonForVacuum(vacuum: VacuumInstance): Promise<void> {
+    const config = this.config as { dockAndEmptyButton?: boolean };
+    if (!config.dockAndEmptyButton) return;
+
+    // Returning to the dock requires basic control; without it the button is meaningless
+    if (!vacuum.capabilities.includes('BasicControlCapability')) {
+      this.log.warn(`[${vacuum.name}] Dock & Empty button enabled but BasicControlCapability is not supported; skipping`);
+      return;
+    }
+
+    const canEmpty = vacuum.capabilities.includes('AutoEmptyDockManualTriggerCapability');
+    const label = canEmpty ? 'Dock & Empty' : 'Return to Dock';
+    const buttonName = `${vacuum.name} ${label}`;
+    const buttonId = `${vacuum.id}-dock-empty`.replace(/[^a-zA-Z0-9-]/g, '_');
+
+    this.log.info(`[${vacuum.name}] Creating "${label}" button (ID: ${buttonId})`);
+
+    const button = new MatterbridgeEndpoint(onOffOutlet, { id: buttonId }, this.config.debug as boolean);
+    button.createDefaultBridgedDeviceBasicInformationClusterServer(buttonName, buttonId, this.matterbridge.aggregatorVendorId, 'Valetudo', label);
+    button.createDefaultOnOffClusterServer(false);
+
+    // Turning the switch on triggers the action; it auto-resets to off so it behaves
+    // as a momentary button suitable for automation actions.
+    button.addCommandHandler('on', async () => {
+      this.log.info(`[${vacuum.name}] ${label} button activated`);
+      await this.handleDockAndEmpty(vacuum);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await button.updateAttribute('OnOff', 'onOff', false, this.log);
+    });
+
+    await this.registerDevice(button);
+    this.log.info(`[${vacuum.name}] ${label} button registered`);
+  }
+
+  /**
+   * Return the robot to its dock and, if supported, empty the dustbin. The empty
+   * can only run while docked, so if the robot is away it is deferred (pendingEmpty)
+   * and triggered by the state subscription once the robot reaches the dock.
+   */
+  private async handleDockAndEmpty(vacuum: VacuumInstance): Promise<void> {
+    const canEmpty = vacuum.capabilities.includes('AutoEmptyDockManualTriggerCapability');
+    try {
+      if (vacuum.docked) {
+        this.log.info(`[${vacuum.name}] Already docked${canEmpty ? ' — triggering auto-empty' : ''}`);
+        if (canEmpty) await vacuum.client.triggerAutoEmpty();
+        return;
+      }
+
+      this.log.info(`[${vacuum.name}] Returning to dock${canEmpty ? ' (will empty once docked)' : ''}`);
+      await vacuum.client.returnHome();
+      if (canEmpty) vacuum.pendingEmpty = true;
+    } catch (error) {
+      this.log.error(`[${vacuum.name}] Dock & Empty failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -879,6 +950,17 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
                     this.log.info(`[${vacuum.name}] Run mode: ${statusAttr.value} → ${runMode === RvcRunModeValue.Cleaning ? 'Cleaning' : 'Idle'}`);
                   }
                   await new Promise((resolve) => setTimeout(resolve, 200));
+                }
+
+                // Track whether the robot is on its dock (for the optional Dock & Empty button).
+                // Prefer the dock status attribute; fall back to the robot status.
+                vacuum.docked = dockStatus ? dockStatus.value !== 'undocked' : statusAttr?.value.toLowerCase() === 'docked';
+
+                // If an empty was requested via the button, fire it once the robot is docked
+                if (vacuum.docked && vacuum.pendingEmpty && vacuum.capabilities.includes('AutoEmptyDockManualTriggerCapability')) {
+                  vacuum.pendingEmpty = false;
+                  this.log.info(`[${vacuum.name}] Robot docked — triggering auto-empty`);
+                  await vacuum.client.triggerAutoEmpty();
                 }
 
                 // Keep the tracked operation mode in sync for clean-mode command handling

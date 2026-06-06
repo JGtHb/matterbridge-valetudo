@@ -101,6 +101,7 @@ If auto-discovery doesn't find your vacuum, add it manually:
   },
   "vacuums": [],
   "enableServerMode": false,
+  "dockAndEmptyButton": false,
   "positionTracking": {
     "enabled": true
   },
@@ -130,6 +131,7 @@ If auto-discovery doesn't find your vacuum, add it manually:
 | `vacuums[].name` | string | auto | Custom friendly name |
 | `vacuums[].enabled` | boolean | `true` | Enable/disable this vacuum |
 | `enableServerMode` | boolean | `false` | Enable for Apple Home support |
+| `dockAndEmptyButton` | boolean | `false` | Expose a switch that returns the robot to its dock and empties (if supported) — handy for Apple Home automations |
 | `positionTracking.enabled` | boolean | `true` | Track current room during cleaning |
 | `consumables.enabled` | boolean | `true` | Enable consumable monitoring |
 | `consumables.warningThreshold` | number | `10` | Warning threshold percentage |
