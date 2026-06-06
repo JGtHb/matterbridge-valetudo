@@ -100,7 +100,6 @@ If auto-discovery doesn't find your vacuum, add it manually:
     "scanIntervalSeconds": 300
   },
   "vacuums": [],
-  "pollingInterval": 30000,
   "enableServerMode": false,
   "positionTracking": {
     "enabled": true
@@ -130,7 +129,6 @@ If auto-discovery doesn't find your vacuum, add it manually:
 | `vacuums[].ip` | string | required | IP address or hostname |
 | `vacuums[].name` | string | auto | Custom friendly name |
 | `vacuums[].enabled` | boolean | `true` | Enable/disable this vacuum |
-| `pollingInterval` | number | `30000` | Status polling interval (5000-60000ms) |
 | `enableServerMode` | boolean | `false` | Enable for Apple Home support |
 | `positionTracking.enabled` | boolean | `true` | Track current room during cleaning |
 | `consumables.enabled` | boolean | `true` | Enable consumable monitoring |

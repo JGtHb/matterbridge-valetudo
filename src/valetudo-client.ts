@@ -297,6 +297,35 @@ export class ValetudoClient {
   }
 
   /**
+   * Create an SSE EventSource for the given URL.
+   *
+   * Injects the Basic Auth header when credentials are configured — the
+   * `eventsource` package only supports custom headers via a `fetch` override,
+   * so without this SSE streams would 401 on password-protected instances.
+   * Also logs connection errors; the underlying EventSource auto-reconnects on
+   * transient failures, so this is for visibility rather than recovery.
+   */
+  private createEventSource(url: string): EventSource {
+    const authHeader = this.authHeader;
+    const eventSource = new EventSource(
+      url,
+      authHeader
+        ? {
+            // The eventsource package already relies on global fetch (Node 20+); a fetch
+            // override is its only supported way to inject custom request headers.
+            // eslint-disable-next-line n/no-unsupported-features/node-builtins
+            fetch: (input, init) => fetch(input, { ...init, headers: { ...init.headers, Authorization: authHeader } }),
+          }
+        : undefined,
+    );
+    eventSource.addEventListener('error', (e) => {
+      const err = e as { code?: number; message?: string };
+      this.log.warn(`SSE connection error for ${url}${err.code ? ` (status ${err.code})` : ''}: ${err.message || 'connection lost, will retry'}`);
+    });
+    return eventSource;
+  }
+
+  /**
    * Subscribe to robot state attributes via Server-Sent Events (SSE).
    *
    * Emits the current attributes once on subscription, then emits updates
@@ -313,7 +342,7 @@ export class ValetudoClient {
 
           if (data) subscriber.next(data);
 
-          eventSource = new EventSource(`${this.baseUrl}/api/v2/robot/state/attributes/sse`);
+          eventSource = this.createEventSource(`${this.baseUrl}/api/v2/robot/state/attributes/sse`);
           eventSource.addEventListener('StateAttributesUpdated', (e: MessageEvent) => {
             if (subscriber.closed) return;
             try {
@@ -614,7 +643,7 @@ export class ValetudoClient {
 
           if (data) subscriber.next(data);
 
-          eventSource = new EventSource(`${this.baseUrl}/api/v2/robot/state/map/sse`);
+          eventSource = this.createEventSource(`${this.baseUrl}/api/v2/robot/state/map/sse`);
           eventSource.addEventListener('MapUpdated', (e: MessageEvent) => {
             if (subscriber.closed) return;
             try {

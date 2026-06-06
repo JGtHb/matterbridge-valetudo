@@ -84,14 +84,6 @@
       },
       "default": []
     },
-    "pollingInterval": {
-      "title": "Polling Interval (ms)",
-      "description": "How often to check vacuum status (5000-60000ms, applies to all vacuums)",
-      "type": "number",
-      "default": 30000,
-      "minimum": 5000,
-      "maximum": 60000
-    },
     "enableServerMode": {
       "title": "Apple Home Server Mode",
       "description": "Enable server mode (required for Apple Home support, creates separate QR code for each vacuum)",
@@ -202,60 +194,73 @@
         }
       }
     },
-    "customTags": {
-      "title": "Custom Mode Tags",
-      "description": "Manually map valetudo presets to matter tags",
+    "operationModeMapping": {
+      "title": "Operation Mode Mapping",
+      "description": "Map each Matter cleaning category (as shown in your controller) to a Valetudo operation mode. Useful if your vacuum supports 'vacuum_then_mop' and you want it under the 'Vacuum & Mop' category.",
+      "type": "object",
+      "properties": {
+        "vacuum": {
+          "title": "Vacuum",
+          "description": "Valetudo mode to use for the Vacuum category (default: vacuum)",
+          "type": "string",
+          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
+          "default": "vacuum"
+        },
+        "mop": {
+          "title": "Mop",
+          "description": "Valetudo mode to use for the Mop category (default: mop)",
+          "type": "string",
+          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
+          "default": "mop"
+        },
+        "vacuumAndMop": {
+          "title": "Vacuum & Mop",
+          "description": "Valetudo mode to use for the Vacuum & Mop category (default: vacuum_and_mop)",
+          "type": "string",
+          "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"],
+          "default": "vacuum_and_mop"
+        }
+      }
+    },
+    "intensityOverrides": {
+      "title": "Intensity Overrides",
+      "description": "Override the fan speed or water usage for specific intensity levels. By default, each intensity maps to its matching Valetudo preset (e.g. Quick → fan 'high'). Use this to change that.",
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["operationModes"],
+        "required": ["intensity"],
         "properties": {
-          "operationModes": {
-            "title": "Operation Modes",
-            "description": "Which valetudo operation mode(s) does this mapping apply to?",
-            "type": "array",
-            "uniqueItems": true,
-            "minItems": 1,
-            "items": {
-              "type": "string",
-              "enum": ["vacuum", "mop", "vacuum_and_mop", "vacuum_then_mop"]
-            },
-            "default": ["vacuum", "mop", "vacuum_and_mop"]
+          "category": {
+            "title": "Category",
+            "description": "Which Matter category to override (leave empty to apply to all categories)",
+            "type": "string",
+            "enum": ["vacuum", "mop", "vacuumAndMop"]
           },
-          "mappings": {
-            "title": "Preset Mappings",
-            "description": "Define the fan speed and/or water usage mappings for the selected mode(s)",
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "fanSpeed": {
-                  "title": "Fan Speed",
-                  "description": "e.g., 'low', 'medium', 'high', 'max'",
-                  "type": "string",
-                  "default": "medium"
-                },
-                "waterUsage": {
-                  "title": "Water Usage",
-                  "description": "For mop modes: 'min', 'low', 'medium', 'high', 'max'",
-                  "type": "string",
-                  "default": "medium"
-                },
-                "matterModeTag": {
-                  "title": "Matter Mode",
-                  "type": "number",
-                  "oneOf": [
-                    { "const": 0, "title": "Auto" },
-                    { "const": 1, "title": "Quick" },
-                    { "const": 2, "title": "Quiet" },
-                    { "const": 6, "title": "Min" },
-                    { "const": 7, "title": "Max" },
-                    { "const": 16384, "title": "DeepClean"}
-                  ],
-                  "default": 0
-                }
-              }
-            }
+          "intensity": {
+            "title": "Intensity",
+            "description": "Which intensity level to override, as shown in your smart home controller",
+            "type": "string",
+            "oneOf": [
+              { "const": "Min", "title": "Min" },
+              { "const": "Quiet", "title": "Quiet (default for 'low')" },
+              { "const": "Auto", "title": "Auto (default for 'medium')" },
+              { "const": "Quick", "title": "Quick (default for 'high')" },
+              { "const": "Max", "title": "Max" },
+              { "const": "DeepClean", "title": "Deep Clean (default for 'turbo')" },
+              { "const": "LowNoise", "title": "Custom / Low Noise" }
+            ]
+          },
+          "fanSpeed": {
+            "title": "Fan Speed",
+            "description": "Fan speed to send to the vacuum",
+            "type": "string",
+            "enum": ["low", "medium", "high", "max"]
+          },
+          "waterUsage": {
+            "title": "Water Usage",
+            "description": "Water usage to send to the vacuum",
+            "type": "string",
+            "enum": ["min", "low", "medium", "high", "max"]
           }
         }
       }
