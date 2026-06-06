@@ -96,6 +96,12 @@
       "type": "boolean",
       "default": false
     },
+    "locateButton": {
+      "title": "Locate Button",
+      "description": "Expose a switch that makes the robot play its locate sound. Useful for Apple Home automations, which cannot trigger locate natively.",
+      "type": "boolean",
+      "default": false
+    },
     "positionTracking": {
       "title": "Position Tracking",
       "description": "Track which room/area the vacuum is currently cleaning",
@@ -106,6 +112,14 @@
           "description": "Show current room/area during cleaning",
           "type": "boolean",
           "default": true
+        },
+        "intervalSeconds": {
+          "title": "Position Poll Interval (s)",
+          "description": "How often to poll the map for the robot's current room (5-300 seconds)",
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "maximum": 300
         }
       }
     },

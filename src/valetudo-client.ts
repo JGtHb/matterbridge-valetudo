@@ -302,10 +302,17 @@ export class ValetudoClient {
    * Injects the Basic Auth header when credentials are configured — the
    * `eventsource` package only supports custom headers via a `fetch` override,
    * so without this SSE streams would 401 on password-protected instances.
-   * Also logs connection errors; the underlying EventSource auto-reconnects on
-   * transient failures, so this is for visibility rather than recovery.
+   *
+   * Logging is rate-limited (one warning per outage, recovery logged on
+   * reconnect) to avoid flooding logs every few seconds during an outage.
+   * The library auto-reconnects on transient/network failures but NOT on a
+   * non-200 HTTP response (it closes permanently); `onTerminalClose` is invoked
+   * in that case so the caller can rebuild the stream.
+   *
+   * @param url - SSE endpoint URL
+   * @param onTerminalClose - called when the connection is permanently closed (readyState CLOSED)
    */
-  private createEventSource(url: string): EventSource {
+  private createEventSource(url: string, onTerminalClose?: () => void): EventSource {
     const authHeader = this.authHeader;
     const eventSource = new EventSource(
       url,
@@ -318,10 +325,27 @@ export class ValetudoClient {
           }
         : undefined,
     );
+
+    let loggedError = false;
+    eventSource.addEventListener('open', () => {
+      if (loggedError) {
+        this.log.info(`SSE reconnected for ${url}`);
+        loggedError = false;
+      }
+    });
     eventSource.addEventListener('error', (e) => {
       const err = e as { code?: number; message?: string };
-      this.log.warn(`SSE connection error for ${url}${err.code ? ` (status ${err.code})` : ''}: ${err.message || 'connection lost, will retry'}`);
+      if (!loggedError) {
+        this.log.warn(`SSE connection error for ${url}${err.code ? ` (status ${err.code})` : ''}: ${err.message || 'connection lost'}`);
+        loggedError = true;
+      } else {
+        this.log.debug(`SSE still retrying ${url}...`);
+      }
+      // readyState CLOSED (2) means a non-200 response permanently closed the stream;
+      // eventsource will NOT auto-reconnect from here, so escalate to the caller.
+      if (eventSource.readyState === 2 && onTerminalClose) onTerminalClose();
     });
+
     return eventSource;
   }
 
@@ -329,22 +353,52 @@ export class ValetudoClient {
    * Subscribe to robot state attributes via Server-Sent Events (SSE).
    *
    * Emits the current attributes once on subscription, then emits updates
-   * whenever Valetudo sends a StateAttributesUpdated event.
+   * whenever Valetudo sends a StateAttributesUpdated event. Resilient to outages:
+   * transient/network drops are handled by the library's auto-reconnect, a
+   * permanent (non-200) close is rebuilt with exponential backoff, and a
+   * low-frequency heartbeat re-fetch self-heals a silently stalled stream and an
+   * idle robot that emits no events (also keeps liveness fresh for reachability).
    *
+   * @param heartbeatMs - periodic full re-fetch interval (0 disables); default 2 min
    * @returns Observable stream of state attributes
    */
-  getStateAttributes$(): Observable<StateAttribute[]> {
-    let eventSource: EventSource | null = null;
+  getStateAttributes$(heartbeatMs: number = 2 * 60 * 1000): Observable<StateAttribute[]> {
     return new Observable<StateAttribute[]>((subscriber) => {
-      this.getStateAttributes()
-        .then((data) => {
-          if (subscriber.closed) return;
+      let eventSource: EventSource | null = null;
+      let reconnectTimer: NodeJS.Timeout | null = null;
+      let heartbeat: NodeJS.Timeout | null = null;
+      let stopped = false;
+      let attempts = 0;
 
-          if (data) subscriber.next(data);
+      const emitCurrent = async () => {
+        const data = await this.getStateAttributes();
+        if (!stopped && data) subscriber.next(data);
+      };
 
-          eventSource = this.createEventSource(`${this.baseUrl}/api/v2/robot/state/attributes/sse`);
+      const scheduleReconnect = () => {
+        if (stopped || reconnectTimer) return;
+        const delay = Math.min(30000, 1000 * 2 ** attempts++);
+        this.log.debug(`Reconnecting attributes SSE in ${delay}ms`);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          void connect();
+        }, delay);
+      };
+
+      const connect = async () => {
+        if (stopped) return;
+        try {
+          // Re-read the full snapshot on every (re)connect so state self-heals
+          await emitCurrent();
+          if (stopped) return;
+          eventSource = this.createEventSource(`${this.baseUrl}/api/v2/robot/state/attributes/sse`, () => {
+            if (stopped) return;
+            eventSource?.close();
+            eventSource = null;
+            scheduleReconnect();
+          });
           eventSource.addEventListener('StateAttributesUpdated', (e: MessageEvent) => {
-            if (subscriber.closed) return;
+            if (stopped) return;
             try {
               this.log.debug('Received StateAttributesUpdated event');
               subscriber.next(JSON.parse(e.data) as StateAttribute[]);
@@ -352,14 +406,26 @@ export class ValetudoClient {
               this.log.error(`Failed to parse attributes SSE data: ${error}`);
             }
           });
-          return;
-        })
-        .catch((error) => {
-          this.log.error(`Error fetching attributes: ${error instanceof Error ? error.message : String(error)}`);
-          if (!subscriber.closed) subscriber.error(error);
-        });
+          attempts = 0; // successful (re)connect
+        } catch (error) {
+          if (stopped) return;
+          this.log.error(`Error establishing attributes stream: ${error instanceof Error ? error.message : String(error)}`);
+          scheduleReconnect();
+        }
+      };
+
+      void connect();
+
+      if (heartbeatMs > 0) {
+        heartbeat = setInterval(() => {
+          if (!stopped) void emitCurrent();
+        }, heartbeatMs);
+      }
 
       return () => {
+        stopped = true;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        if (heartbeat) clearInterval(heartbeat);
         if (eventSource) {
           this.log.debug('Closing attributes SSE connection');
           eventSource.close();
@@ -643,68 +709,46 @@ export class ValetudoClient {
   }
 
   /**
-   * Subscribe to robot position data via periodic polling.
+   * Subscribe to full map data via periodic polling.
    *
-   * Emits the current position once on subscription, then polls on the given
-   * interval. Polling is used here rather than the map SSE because Valetudo's
-   * map SSE pushes the full map (pixel layers) on every update — far more data
-   * than position tracking needs — whereas a "current room" lookup tolerates a
-   * polling delay. State attributes still use SSE (small, latency-sensitive).
+   * Emits the current map once on subscription, then polls on the given interval.
+   * Polling is used rather than the map SSE because Valetudo's map SSE pushes the
+   * full map (pixel layers) on every update — far more data than position tracking
+   * needs — whereas a "current room" lookup tolerates a polling delay. State
+   * attributes still use SSE (small, latency-sensitive). The full payload (vs a
+   * position-only subset) is emitted so the caller can build its map cache from the
+   * same response instead of issuing a second fetch. An in-flight guard prevents
+   * overlapping requests if a fetch ever exceeds the poll interval.
    *
    * @param interval - Polling interval in milliseconds (default: 30 seconds)
-   * @returns Observable stream of position data
+   * @returns Observable stream of full map data
    */
-  getMapPositionData$(interval: number = 30 * 1000): Observable<MapPositionData> {
-    let positionInterval: NodeJS.Timeout | null = null;
-    return new Observable<MapPositionData>((subscriber) => {
-      this.getMapPositionData()
-        .then((data) => {
-          if (subscriber.closed) return;
+  getMapData$(interval: number = 30 * 1000): Observable<MapData> {
+    let mapInterval: NodeJS.Timeout | null = null;
+    let fetching = false;
+    return new Observable<MapData>((subscriber) => {
+      const poll = async () => {
+        if (fetching || subscriber.closed) return;
+        fetching = true;
+        try {
+          const mapData = await this.getMapDataWithTimeout(60000);
+          if (!subscriber.closed && mapData) subscriber.next(mapData);
+        } finally {
+          fetching = false;
+        }
+      };
 
-          if (data) subscriber.next(data);
-
-          positionInterval = setInterval(async () => {
-            const positionData = await this.getMapPositionData();
-            if (!positionData) return;
-            subscriber.next(positionData);
-          }, interval);
-          return;
-        })
-        .catch((error) => {
-          this.log.error(`Error fetching position data: ${error instanceof Error ? error.message : String(error)}`);
-          if (!subscriber.closed) subscriber.error(error);
-        });
+      void poll();
+      mapInterval = setInterval(() => void poll(), interval);
 
       return () => {
-        if (positionInterval) {
-          this.log.debug('Clearing position polling interval');
-          clearInterval(positionInterval);
-          positionInterval = null;
+        if (mapInterval) {
+          this.log.debug('Clearing map polling interval');
+          clearInterval(mapInterval);
+          mapInterval = null;
         }
       };
     });
-  }
-
-  /**
-   * Get only position data from map (still calls full endpoint but extracts only entities)
-   * In the future, this could be optimized if Valetudo adds a position-only endpoint
-   *
-   * @returns Position data with entities and metadata version
-   */
-  async getMapPositionData(): Promise<MapPositionData | null> {
-    try {
-      const data = await this.httpGet(`${this.baseUrl}/api/v2/robot/state/map`);
-      const mapData = data as MapData;
-
-      // Return only what we need for position tracking
-      return {
-        entities: mapData.entities,
-        metaData: mapData.metaData,
-      };
-    } catch (error) {
-      this.log.error(`Error fetching position data: ${error instanceof Error ? error.message : String(error)}`);
-      return null;
-    }
   }
 
   /**

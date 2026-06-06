@@ -4,6 +4,7 @@ import { vi, describe, beforeEach, afterAll, it, expect } from 'vitest';
 import { AnsiLogger, LogLevel } from 'matterbridge/logger';
 import { MatterbridgeEndpoint, PlatformConfig, PlatformMatterbridge, SystemInformation } from 'matterbridge';
 import { VendorId } from 'matterbridge/matter';
+import { RvcOperationalState } from 'matterbridge/matter/clusters';
 
 import { ValetudoPlatform } from '../src/module.ts';
 
@@ -112,5 +113,183 @@ describe('Matterbridge Valetudo Plugin', () => {
     expect(mockLog.info).toHaveBeenCalledWith('onShutdown called with reason: none');
     // Note: removeAllBridgedEndpoints is called on the platform base class internally
     mockConfig.unregisterOnShutdown = false;
+  });
+});
+
+// ============================================================================
+// Status mapping, Dock & Empty / Locate buttons, consumables gating
+// ============================================================================
+
+// A minimal mock ValetudoClient exposing only the methods these tests exercise
+function makeMockClient() {
+  return {
+    returnHome: vi.fn().mockResolvedValue(true),
+    triggerAutoEmpty: vi.fn().mockResolvedValue(true),
+    locate: vi.fn().mockResolvedValue(true),
+    getConsumables: vi.fn().mockResolvedValue([]),
+    getConsumablesProperties: vi.fn().mockResolvedValue([]),
+  };
+}
+
+// A minimal VacuumInstance for exercising private logic without a real device/client
+function makeVacuum(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'system-1',
+    name: 'Test Vacuum',
+    client: makeMockClient(),
+    device: null,
+    capabilities: [],
+    consumableMap: new Map(),
+    docked: false,
+    pendingEmptyAt: null,
+    ...overrides,
+  };
+}
+
+describe('ValetudoPlatform — status mapping', () => {
+  let platform: ValetudoPlatform;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMatterbridge.matterbridgeVersion = '3.4.0';
+    platform = new ValetudoPlatform(mockMatterbridge, mockLog, mockConfig);
+  });
+
+  it('maps Valetudo statuses to RVC operational states', () => {
+    const map = (status: string, dock?: string) =>
+      (platform as unknown as { mapValetudoStatusToOperationalState(s: string, d?: string): number }).mapValetudoStatusToOperationalState(status, dock);
+    expect(map('cleaning')).toBe(RvcOperationalState.OperationalState.Running);
+    expect(map('docked')).toBe(RvcOperationalState.OperationalState.Docked);
+    expect(map('idle')).toBe(RvcOperationalState.OperationalState.Docked);
+    expect(map('paused')).toBe(RvcOperationalState.OperationalState.Paused);
+    expect(map('error')).toBe(RvcOperationalState.OperationalState.Error);
+    expect(map('returning')).toBe(RvcOperationalState.OperationalState.SeekingCharger);
+  });
+
+  it('maps Valetudo statuses to RVC run modes (idle vs cleaning)', () => {
+    const map = (status: string) => (platform as unknown as { mapValetudoStatusToRunMode(s: string): number }).mapValetudoStatusToRunMode(status);
+    expect(map('cleaning')).toBe(2); // RvcRunModeValue.Cleaning
+    expect(map('idle')).toBe(1); // RvcRunModeValue.Idle
+    expect(map('docked')).toBe(1);
+  });
+});
+
+describe('ValetudoPlatform — handleDockAndEmpty', () => {
+  let platform: ValetudoPlatform;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMatterbridge.matterbridgeVersion = '3.4.0';
+    platform = new ValetudoPlatform(mockMatterbridge, mockLog, mockConfig);
+  });
+
+  const handle = (vacuum: unknown) => (platform as unknown as { handleDockAndEmpty(v: unknown): Promise<void> }).handleDockAndEmpty(vacuum);
+
+  it('empties immediately when already docked and auto-empty is supported', async () => {
+    const vacuum = makeVacuum({ docked: true, capabilities: ['BasicControlCapability', 'AutoEmptyDockManualTriggerCapability'] });
+    await handle(vacuum);
+    expect(vacuum.client.triggerAutoEmpty).toHaveBeenCalledTimes(1);
+    expect(vacuum.client.returnHome).not.toHaveBeenCalled();
+    expect(vacuum.pendingEmptyAt).toBeNull();
+  });
+
+  it('returns to dock and defers the empty when away and auto-empty is supported', async () => {
+    const vacuum = makeVacuum({ docked: false, capabilities: ['BasicControlCapability', 'AutoEmptyDockManualTriggerCapability'] });
+    await handle(vacuum);
+    expect(vacuum.client.returnHome).toHaveBeenCalledTimes(1);
+    expect(vacuum.client.triggerAutoEmpty).not.toHaveBeenCalled();
+    expect(typeof vacuum.pendingEmptyAt).toBe('number');
+  });
+
+  it('only returns to dock (no pending empty) when auto-empty is not supported', async () => {
+    const vacuum = makeVacuum({ docked: false, capabilities: ['BasicControlCapability'] });
+    await handle(vacuum);
+    expect(vacuum.client.returnHome).toHaveBeenCalledTimes(1);
+    expect(vacuum.client.triggerAutoEmpty).not.toHaveBeenCalled();
+    expect(vacuum.pendingEmptyAt).toBeNull();
+  });
+});
+
+describe('ValetudoPlatform — setupButtonsForVacuum gating', () => {
+  let platform: ValetudoPlatform;
+  let createButton: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMatterbridge.matterbridgeVersion = '3.4.0';
+    platform = new ValetudoPlatform(mockMatterbridge, mockLog, mockConfig);
+    createButton = vi.spyOn(platform as unknown as { createMomentaryButton: () => Promise<void> }, 'createMomentaryButton').mockResolvedValue(undefined);
+  });
+
+  afterAll(() => {
+    delete (mockConfig as Record<string, unknown>).dockAndEmptyButton;
+    delete (mockConfig as Record<string, unknown>).locateButton;
+  });
+
+  const setup = (vacuum: unknown) => (platform as unknown as { setupButtonsForVacuum(v: unknown): Promise<void> }).setupButtonsForVacuum(vacuum);
+
+  it('creates a "Dock & Empty" button when enabled and the robot can auto-empty', async () => {
+    (mockConfig as Record<string, unknown>).dockAndEmptyButton = true;
+    (mockConfig as Record<string, unknown>).locateButton = false;
+    await setup(makeVacuum({ capabilities: ['BasicControlCapability', 'AutoEmptyDockManualTriggerCapability'] }));
+    expect(createButton).toHaveBeenCalledWith(expect.anything(), 'dock-empty', 'Dock & Empty', expect.any(Function));
+  });
+
+  it('labels the button "Return to Dock" when the robot cannot auto-empty', async () => {
+    (mockConfig as Record<string, unknown>).dockAndEmptyButton = true;
+    (mockConfig as Record<string, unknown>).locateButton = false;
+    await setup(makeVacuum({ capabilities: ['BasicControlCapability'] }));
+    expect(createButton).toHaveBeenCalledWith(expect.anything(), 'dock-empty', 'Return to Dock', expect.any(Function));
+  });
+
+  it('skips the Dock & Empty button without BasicControlCapability', async () => {
+    (mockConfig as Record<string, unknown>).dockAndEmptyButton = true;
+    (mockConfig as Record<string, unknown>).locateButton = false;
+    await setup(makeVacuum({ capabilities: [] }));
+    expect(createButton).not.toHaveBeenCalled();
+  });
+
+  it('creates a Locate button only when enabled and supported', async () => {
+    (mockConfig as Record<string, unknown>).dockAndEmptyButton = false;
+    (mockConfig as Record<string, unknown>).locateButton = true;
+    await setup(makeVacuum({ capabilities: ['LocateCapability'] }));
+    expect(createButton).toHaveBeenCalledWith(expect.anything(), 'locate', 'Locate', expect.any(Function));
+  });
+
+  it('creates no buttons when both flags are off', async () => {
+    (mockConfig as Record<string, unknown>).dockAndEmptyButton = false;
+    (mockConfig as Record<string, unknown>).locateButton = false;
+    await setup(makeVacuum({ capabilities: ['BasicControlCapability', 'LocateCapability'] }));
+    expect(createButton).not.toHaveBeenCalled();
+  });
+});
+
+describe('ValetudoPlatform — consumables enabled default', () => {
+  let platform: ValetudoPlatform;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMatterbridge.matterbridgeVersion = '3.4.0';
+    platform = new ValetudoPlatform(mockMatterbridge, mockLog, mockConfig);
+  });
+
+  afterAll(() => {
+    delete (mockConfig as Record<string, unknown>).consumables;
+  });
+
+  const setup = (vacuum: unknown) => (platform as unknown as { setupConsumablesForVacuum(v: unknown): Promise<void> }).setupConsumablesForVacuum(vacuum);
+
+  it('treats consumables as enabled by default (config key absent)', async () => {
+    delete (mockConfig as Record<string, unknown>).consumables;
+    // No ConsumableMonitoringCapability → it should pass the enabled gate and stop at the capability check
+    await setup(makeVacuum({ capabilities: [] }));
+    expect(mockLog.debug).not.toHaveBeenCalledWith('[Test Vacuum] Consumable tracking disabled');
+    expect(mockLog.warn).toHaveBeenCalledWith('[Test Vacuum] ConsumableMonitoringCapability not supported');
+  });
+
+  it('disables consumables only when explicitly set to false', async () => {
+    (mockConfig as Record<string, unknown>).consumables = { enabled: false };
+    await setup(makeVacuum({ capabilities: ['ConsumableMonitoringCapability'] }));
+    expect(mockLog.debug).toHaveBeenCalledWith('[Test Vacuum] Consumable tracking disabled');
   });
 });
