@@ -627,44 +627,43 @@ export class ValetudoClient {
   }
 
   /**
-   * Subscribe to map data via Server-Sent Events (SSE).
+   * Subscribe to robot position data via periodic polling.
    *
-   * Emits the current map once on subscription, then emits updates
-   * whenever Valetudo sends a MapUpdated event.
+   * Emits the current position once on subscription, then polls on the given
+   * interval. Polling is used here rather than the map SSE because Valetudo's
+   * map SSE pushes the full map (pixel layers) on every update — far more data
+   * than position tracking needs — whereas a "current room" lookup tolerates a
+   * polling delay. State attributes still use SSE (small, latency-sensitive).
    *
-   * @returns Observable stream of map data
+   * @param interval - Polling interval in milliseconds (default: 30 seconds)
+   * @returns Observable stream of position data
    */
-  getMapData$(): Observable<MapData> {
-    let eventSource: EventSource | null = null;
-    return new Observable<MapData>((subscriber) => {
-      this.getMapDataWithTimeout(10000)
+  getMapPositionData$(interval: number = 30 * 1000): Observable<MapPositionData> {
+    let positionInterval: NodeJS.Timeout | null = null;
+    return new Observable<MapPositionData>((subscriber) => {
+      this.getMapPositionData()
         .then((data) => {
           if (subscriber.closed) return;
 
           if (data) subscriber.next(data);
 
-          eventSource = this.createEventSource(`${this.baseUrl}/api/v2/robot/state/map/sse`);
-          eventSource.addEventListener('MapUpdated', (e: MessageEvent) => {
-            if (subscriber.closed) return;
-            try {
-              this.log.debug('Received MapUpdated event');
-              subscriber.next(JSON.parse(e.data) as MapData);
-            } catch (error) {
-              this.log.error(`Failed to parse map SSE data: ${error}`);
-            }
-          });
+          positionInterval = setInterval(async () => {
+            const positionData = await this.getMapPositionData();
+            if (!positionData) return;
+            subscriber.next(positionData);
+          }, interval);
           return;
         })
         .catch((error) => {
-          this.log.error(`Error fetching map data: ${error instanceof Error ? error.message : String(error)}`);
+          this.log.error(`Error fetching position data: ${error instanceof Error ? error.message : String(error)}`);
           if (!subscriber.closed) subscriber.error(error);
         });
 
       return () => {
-        if (eventSource) {
-          this.log.debug('Closing map SSE connection');
-          eventSource.close();
-          eventSource = null;
+        if (positionInterval) {
+          this.log.debug('Clearing position polling interval');
+          clearInterval(positionInterval);
+          positionInterval = null;
         }
       };
     });
