@@ -982,7 +982,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
                 const dockStatus = attributes.find((attr) => attr.__class === 'DockStatusStateAttribute') as { value: string } | undefined;
 
                 if (statusAttr) {
-                  const operationalState = this.mapValetudoStatusToOperationalState(statusAttr.value, dockStatus?.value);
+                  const operationalState = this.mapValetudoStatusToOperationalState(statusAttr.value, dockStatus?.value, battery?.flag === 'charging');
                   if (await vacuum.device.updateAttribute('RvcOperationalState', 'operationalState', operationalState, this.log)) {
                     this.log.info(`[${vacuum.name}] Operational state: "${statusAttr.value}" → ${operationalState}`);
                   }
@@ -1426,9 +1426,14 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   }
 
   /**
-   * Map Valetudo status to Matter RVC Operational State
+   * Map Valetudo status to Matter RVC Operational State.
+   *
+   * @param status - Valetudo StatusStateAttribute value
+   * @param dockStatus - Valetudo DockStatusStateAttribute value (if present)
+   * @param isCharging - whether the battery flag reports charging (Valetudo has no
+   *   'charging' status; charging is a battery flag, so it is surfaced here)
    */
-  private mapValetudoStatusToOperationalState(status: string, dockStatus?: string): number {
+  private mapValetudoStatusToOperationalState(status: string, dockStatus?: string, isCharging?: boolean): number {
     const statusLower = status.toLowerCase();
 
     const statusMap: Record<string, RvcOperationalState.OperationalState> = {
@@ -1447,9 +1452,16 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
     if (dockStatus && (statusLower === 'docked' || statusLower === 'idle' || statusLower === 'charging')) {
       const dockStatusLower = dockStatus.toLowerCase();
+      // The dock actively servicing the robot (emptying/drying/self-cleaning) takes precedence
       if (dockStatusLower === 'emptying' || dockStatusLower === 'drying' || dockStatusLower === 'cleaning') {
         return RvcOperationalState.OperationalState.Docked;
       }
+    }
+
+    // A parked-but-charging robot shows Charging (rather than plain Docked) so controllers
+    // can distinguish "charging" from "docked & ready".
+    if (isCharging && (statusLower === 'docked' || statusLower === 'idle')) {
+      return RvcOperationalState.OperationalState.Charging;
     }
 
     return baseState;

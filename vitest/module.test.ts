@@ -156,14 +156,27 @@ describe('ValetudoPlatform — status mapping', () => {
   });
 
   it('maps Valetudo statuses to RVC operational states', () => {
-    const map = (status: string, dock?: string) =>
-      (platform as unknown as { mapValetudoStatusToOperationalState(s: string, d?: string): number }).mapValetudoStatusToOperationalState(status, dock);
+    const map = (status: string, dock?: string, charging?: boolean) =>
+      (platform as unknown as { mapValetudoStatusToOperationalState(s: string, d?: string, c?: boolean): number }).mapValetudoStatusToOperationalState(status, dock, charging);
     expect(map('cleaning')).toBe(RvcOperationalState.OperationalState.Running);
     expect(map('docked')).toBe(RvcOperationalState.OperationalState.Docked);
     expect(map('idle')).toBe(RvcOperationalState.OperationalState.Docked);
     expect(map('paused')).toBe(RvcOperationalState.OperationalState.Paused);
     expect(map('error')).toBe(RvcOperationalState.OperationalState.Error);
     expect(map('returning')).toBe(RvcOperationalState.OperationalState.SeekingCharger);
+  });
+
+  it('shows Charging when parked and the battery is charging', () => {
+    const map = (status: string, dock?: string, charging?: boolean) =>
+      (platform as unknown as { mapValetudoStatusToOperationalState(s: string, d?: string, c?: boolean): number }).mapValetudoStatusToOperationalState(status, dock, charging);
+    expect(map('docked', undefined, true)).toBe(RvcOperationalState.OperationalState.Charging);
+    expect(map('idle', undefined, true)).toBe(RvcOperationalState.OperationalState.Charging);
+    // Not charging (e.g. fully charged) stays Docked
+    expect(map('docked', undefined, false)).toBe(RvcOperationalState.OperationalState.Docked);
+    // Dock actively servicing the robot takes precedence over charging
+    expect(map('docked', 'emptying', true)).toBe(RvcOperationalState.OperationalState.Docked);
+    // Charging flag does not affect an actively-cleaning robot
+    expect(map('cleaning', undefined, true)).toBe(RvcOperationalState.OperationalState.Running);
   });
 
   it('maps Valetudo statuses to RVC run modes (idle vs cleaning)', () => {
