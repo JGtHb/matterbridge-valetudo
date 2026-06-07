@@ -1104,16 +1104,18 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
                 entry.consumable.remaining.value = remaining;
                 const needsReplacement = entry.properties.maxValue <= 0 || remaining / entry.properties.maxValue <= warningThreshold;
 
-                // Log status change
+                // Only act on an actual status change. The sensor's initial value is set in
+                // setupConsumablesForVacuum, so writing it unconditionally every poll just
+                // produced redundant "from X to X" log noise.
                 if (entry.lastState === undefined || entry.lastState !== needsReplacement) {
                   const status = needsReplacement ? '⚠️ NEEDS REPLACEMENT' : '✓ OK';
                   this.log.info(`[${vacuum.name}] ${name}: ${remaining} ${consumable.remaining.unit} - ${status}`);
                   entry.lastState = needsReplacement;
-                }
 
-                // Update contact sensor if it exists
-                if (entry.endpoint) {
-                  await entry.endpoint.updateAttribute('BooleanState', 'stateValue', !needsReplacement, this.log);
+                  // Update the contact sensor if it exists
+                  if (entry.endpoint) {
+                    await entry.endpoint.updateAttribute('BooleanState', 'stateValue', !needsReplacement, this.log);
+                  }
                 }
               }
             } catch (error) {
