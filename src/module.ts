@@ -7,16 +7,27 @@
  * @license Apache-2.0
  */
 
-import { MatterbridgeDynamicPlatform, PlatformConfig, MatterbridgeEndpoint, contactSensor } from 'matterbridge';
+import { MatterbridgeDynamicPlatform, PlatformConfig, MatterbridgeEndpoint, contactSensor, onOffOutlet } from 'matterbridge';
 import { RoboticVacuumCleaner } from 'matterbridge/devices';
 import { AnsiLogger, LogLevel } from 'matterbridge/logger';
 import { RvcCleanMode, RvcOperationalState, RvcRunMode } from 'matterbridge/matter/clusters';
+import { Subscription, concatMap, defer } from 'rxjs';
 
 // Derive PlatformMatterbridge type from the parent class constructor to avoid
 // import resolution issues across different npm dependency tree layouts.
 type PlatformMatterbridge = ConstructorParameters<typeof MatterbridgeDynamicPlatform>[0];
 
-import { BatteryStateAttribute, CachedMapLayers, ConsumableProperties, PresetLevel, ValetudoClient, ValetudoConsumable, ValetudoOperationMode } from './valetudo-client.js';
+import {
+  BatteryFlag,
+  BatteryStateAttribute,
+  CachedMapLayers,
+  ConsumableProperties,
+  MapData,
+  PresetLevel,
+  ValetudoClient,
+  ValetudoConsumable,
+  ValetudoOperationMode,
+} from './valetudo-client.js';
 import { ValetudoDiscovery } from './valetudo-discovery.js';
 
 /**
@@ -24,12 +35,10 @@ import { ValetudoDiscovery } from './valetudo-discovery.js';
  */
 interface VacuumInstance {
   id: string; // systemId from Valetudo
-  ip: string;
   name: string;
   client: ValetudoClient;
   device: RoboticVacuumCleaner | null;
-  pollingInterval: NodeJS.Timeout | null;
-  initialPollTimeout: NodeJS.Timeout | null;
+  subscriptions: Subscription;
 
   // Per-vacuum state
   capabilities: string[];
@@ -43,20 +52,14 @@ interface VacuumInstance {
   consumableMap: Map<string, { endpoint?: MatterbridgeEndpoint; consumable: ValetudoConsumable; properties: ConsumableProperties; lastState?: boolean }>;
   mapLayersCache: CachedMapLayers | null;
   mapCacheValidUntil: number;
-  lastCurrentArea: number | null;
-  lastConsumablesCheck: number;
 
-  // Change tracking
-  lastBatteryLevel: number | null;
-  lastBatteryChargeState: number | null;
-  lastOperationalState: number | null;
-  lastRunMode: number | null;
-  initialStatePending: boolean; // Flag to set initial state on first poll
+  // Dock & Empty button state
+  docked: boolean; // whether the robot is currently on its dock (from state attributes)
+  pendingEmptyAt: number | null; // timestamp of a button-requested empty awaiting docking (null = none)
 
   // Metadata
   source: 'mdns' | 'manual';
-  lastSeen: number;
-  online: boolean;
+  lastSeen: number; // timestamp of the last successful update from the robot (drives reachability)
 }
 
 /**
@@ -69,6 +72,15 @@ const enum RvcRunModeValue {
 }
 
 const RvcCleanModeBase = 5;
+
+// A button-requested auto-empty is dropped if the robot hasn't docked within this window,
+// so a stale request can't fire on an unrelated future docking.
+const PENDING_EMPTY_TTL_MS = 15 * 60 * 1000;
+
+// Reachability: a vacuum is marked unreachable if no update arrives within this window,
+// checked on this cadence. The state stream's heartbeat re-fetch keeps liveness fresh.
+const REACHABLE_STALE_MS = 5 * 60 * 1000;
+const REACHABILITY_CHECK_MS = 60 * 1000;
 
 /**
  * Plugin initialization function - standard Matterbridge plugin interface.
@@ -90,6 +102,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   private vacuums: Map<string, VacuumInstance> = new Map();
   private mdns: ValetudoDiscovery | null = null;
   private discoveryInterval: NodeJS.Timeout | null = null;
+  private reachabilityInterval: NodeJS.Timeout | null = null;
 
   constructor(matterbridge: PlatformMatterbridge, log: AnsiLogger, config: PlatformConfig) {
     super(matterbridge, log, config);
@@ -151,22 +164,21 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       this.discoveryInterval = null;
     }
 
+    // Stop reachability watchdog
+    if (this.reachabilityInterval) {
+      clearInterval(this.reachabilityInterval);
+      this.reachabilityInterval = null;
+    }
+
     // Destroy mDNS instance
     if (this.mdns) {
       this.mdns.destroy();
       this.mdns = null;
     }
 
-    // Stop polling for all vacuums
+    // Tear down all real-time subscriptions (SSE connections + consumables polling)
     for (const vacuum of this.vacuums.values()) {
-      if (vacuum.initialPollTimeout) {
-        clearTimeout(vacuum.initialPollTimeout);
-        vacuum.initialPollTimeout = null;
-      }
-      if (vacuum.pollingInterval) {
-        clearInterval(vacuum.pollingInterval);
-        vacuum.pollingInterval = null;
-      }
+      vacuum.subscriptions.unsubscribe();
     }
 
     // Clear vacuum map
@@ -226,7 +238,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       for (const vacuum of discovered) {
         try {
           // Check if already added manually
-          const existing = Array.from(this.vacuums.values()).find((v) => v.ip === vacuum.ip);
+          const existing = Array.from(this.vacuums.values()).find((v) => v.client.ip === vacuum.ip);
           if (existing) {
             this.log.info(`Vacuum at ${vacuum.ip} already added manually, skipping mDNS entry`);
             continue;
@@ -278,11 +290,16 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     // Check for duplicate systemId
     const existing = this.vacuums.get(info.systemId);
     if (existing) {
-      if (existing.ip !== ip) {
-        this.log.warn(`Vacuum ${info.systemId} already exists at ${existing.ip}, now found at ${ip}. Updating IP address.`);
-        existing.ip = ip;
+      if (existing.client.ip !== ip) {
+        this.log.warn(`Vacuum ${info.systemId} already exists at ${existing.client.ip}, now found at ${ip}. Reconnecting to new address.`);
+        // Tear down the streams bound to the old client/IP, then rebuild them
+        // against the new client. A Subscription is single-use once unsubscribed,
+        // so a fresh one is required before re-subscribing.
+        existing.subscriptions.unsubscribe();
         existing.client = client;
+        existing.subscriptions = new Subscription();
         existing.lastSeen = Date.now();
+        await this.setupSubscriptions(existing);
         return;
       } else {
         this.log.warn(`Vacuum ${info.systemId} at ${ip} already added, skipping`);
@@ -312,12 +329,10 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     // Create vacuum instance
     const vacuum: VacuumInstance = {
       id: info.systemId,
-      ip,
       name: deviceName,
       client,
       device: null,
-      pollingInterval: null,
-      initialPollTimeout: null,
+      subscriptions: new Subscription(),
       capabilities: [],
       areaToSegmentMap: new Map(),
       modeMap: new Map(),
@@ -329,16 +344,10 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       consumableMap: new Map(),
       mapLayersCache: null,
       mapCacheValidUntil: 0,
-      lastCurrentArea: null,
-      lastConsumablesCheck: 0,
-      lastBatteryLevel: null,
-      lastBatteryChargeState: null,
-      lastOperationalState: null,
-      lastRunMode: null,
-      initialStatePending: true,
+      docked: false,
+      pendingEmptyAt: null,
       source,
       lastSeen: Date.now(),
-      online: true,
     };
 
     // Store vacuum
@@ -367,13 +376,15 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       // Create Matter device for this vacuum
       await this.createDeviceForVacuum(vacuum);
 
-      // Start polling for this vacuum
-      this.startPollingForVacuum(vacuum);
+      // Migrate any persisted legacy clean mode to a real mode
+      await this.migrateCleanModeIfNeeded(vacuum);
+
+      // Start real-time subscriptions for this vacuum
+      await this.setupSubscriptions(vacuum);
 
       this.log.info(`Successfully initialized vacuum: ${vacuum.name}`);
     } catch (error) {
       this.log.error(`Failed to initialize vacuum ${vacuum.name}: ${error instanceof Error ? error.message : String(error)}`);
-      vacuum.online = false;
     }
   }
 
@@ -774,6 +785,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       vacuum.device.softwareVersionString = this.version || '1.0.0';
       vacuum.device.hardwareVersion = 1;
       vacuum.device.hardwareVersionString = this.matterbridge.matterbridgeVersion;
+      // robotInfo is guaranteed non-null here (fetched and checked at the top of this method)
+      vacuum.device.vendorName = 'Valetudo';
+      vacuum.device.productName = `${robotInfo.manufacturer} ${robotInfo.modelName}`;
 
       if (!vacuum.device.mode) {
         vacuum.device.createDefaultBridgedDeviceBasicInformationClusterServer(
@@ -801,60 +815,319 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
         await vacuum.device.setAttribute('ServiceArea', 'supportedAreas', supportedAreas, this.log);
         await new Promise((resolve) => setTimeout(resolve, 200));
         await vacuum.device.setAttribute('ServiceArea', 'currentArea', supportedAreas[0].areaId, this.log);
-        vacuum.lastCurrentArea = supportedAreas[0].areaId;
         this.log.info(`  Initial currentArea set to: ${supportedAreas[0].areaId}`);
       } else {
         this.log.warn(`  No supportedAreas to set! supportedAreas is ${supportedAreas ? 'empty array' : 'undefined'}`);
       }
 
-      // Set initial state AFTER registering and setting areas
-      await this.setInitialVacuumState(vacuum);
-
-      // Set up consumables for this vacuum
+      // Set up consumables for this vacuum. Initial vacuum state (battery, status,
+      // run mode) is populated by the SSE subscriptions set up in setupSubscriptions().
       await this.setupConsumablesForVacuum(vacuum);
+
+      // Optionally expose momentary buttons (Dock & Empty, Locate) for Apple Home automations
+      await this.setupButtonsForVacuum(vacuum);
     } catch (error) {
       throw new Error(`Failed to create device: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   /**
-   * Start polling for a specific vacuum
+   * Optionally expose momentary buttons for use in Apple Home automations, which
+   * cannot natively trigger return-to-dock or locate. Each is gated behind a config
+   * flag and the relevant robot capability.
    */
-  private startPollingForVacuum(vacuum: VacuumInstance): void {
-    const config = this.config as { pollingInterval?: number };
-    const baseInterval = Math.max(5000, Math.min(60000, config.pollingInterval || 30000));
+  private async setupButtonsForVacuum(vacuum: VacuumInstance): Promise<void> {
+    const config = this.config as { dockAndEmptyButton?: boolean; locateButton?: boolean };
 
-    // Add minimum 10 second delay before first poll to allow subscription to stabilize
-    const MIN_INITIAL_DELAY = 10000;
+    if (config.dockAndEmptyButton) {
+      // Returning to the dock requires basic control; without it the button is meaningless
+      if (vacuum.capabilities.includes('BasicControlCapability')) {
+        const label = vacuum.capabilities.includes('AutoEmptyDockManualTriggerCapability') ? 'Dock & Empty' : 'Return to Dock';
+        await this.createMomentaryButton(vacuum, 'dock-empty', label, () => this.handleDockAndEmpty(vacuum));
+      } else {
+        this.log.warn(`[${vacuum.name}] Dock & Empty button enabled but BasicControlCapability is not supported; skipping`);
+      }
+    }
 
-    // Stagger polling intervals to avoid concurrent request spikes
-    const vacuumIndex = Array.from(this.vacuums.keys()).indexOf(vacuum.id);
-    const staggerOffset = vacuumIndex * 1000; // 1 second stagger per vacuum
-    const totalDelay = MIN_INITIAL_DELAY + staggerOffset;
+    if (config.locateButton) {
+      if (vacuum.capabilities.includes('LocateCapability')) {
+        await this.createMomentaryButton(vacuum, 'locate', 'Locate', async () => {
+          await vacuum.client.locate();
+        });
+      } else {
+        this.log.warn(`[${vacuum.name}] Locate button enabled but LocateCapability is not supported; skipping`);
+      }
+    }
+  }
 
-    vacuum.initialPollTimeout = setTimeout(async () => {
-      vacuum.initialPollTimeout = null;
+  /**
+   * Create a momentary On/Off accessory (onOffOutlet) for a vacuum. Turning it on
+   * runs onActivate and then auto-resets to off after a fixed ~1s pulse, so it
+   * behaves like a button suitable for automation actions. The whole setup and the
+   * handler are isolated in try/catch so an optional button can never abort core
+   * device creation or surface an unhandled rejection.
+   *
+   * @param vacuum - the owning vacuum
+   * @param idSuffix - unique-per-vacuum endpoint id suffix
+   * @param label - display name / vendor label
+   * @param onActivate - action to run when the button is activated (must handle its own errors)
+   */
+  private async createMomentaryButton(vacuum: VacuumInstance, idSuffix: string, label: string, onActivate: () => Promise<void>): Promise<void> {
+    const buttonName = `${vacuum.name} ${label}`;
+    const buttonId = `${vacuum.id}-${idSuffix}`.replace(/[^a-zA-Z0-9-]/g, '_');
+    this.log.info(`[${vacuum.name}] Creating "${label}" button (ID: ${buttonId})`);
 
-      // Trigger immediate first poll when starting
-      try {
-        this.log.info(`[${vacuum.name}] Running initial state update...`);
-        await this.updateVacuumState(vacuum);
-      } catch (error) {
-        this.log.error(`[${vacuum.name}] Error in initial poll: ${error instanceof Error ? error.message : String(error)}`);
+    try {
+      const button = new MatterbridgeEndpoint(onOffOutlet, { id: buttonId }, this.config.debug as boolean);
+      button.createDefaultBridgedDeviceBasicInformationClusterServer(buttonName, buttonId, this.matterbridge.aggregatorVendorId, 'Valetudo', label);
+      button.createDefaultOnOffClusterServer(false);
+
+      button.addCommandHandler('on', async () => {
+        try {
+          this.log.info(`[${vacuum.name}] ${label} button activated`);
+          // Fire-and-forget so the momentary pulse length is fixed (not coupled to the
+          // robot's HTTP latency); onActivate handles its own errors.
+          void onActivate();
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          await button.updateAttribute('OnOff', 'onOff', false, this.log);
+        } catch (error) {
+          this.log.debug(`[${vacuum.name}] ${label} button reset error: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+
+      await this.registerDevice(button);
+      this.log.info(`[${vacuum.name}] ${label} button registered`);
+    } catch (error) {
+      this.log.error(`[${vacuum.name}] Failed to create "${label}" button: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Return the robot to its dock and, if supported, empty the dustbin. The empty can
+   * only run while docked, so if the robot is away it is deferred (pendingEmptyAt) and
+   * triggered by the state subscription once the robot reaches the dock (subject to a
+   * TTL so a stale request can't fire later).
+   */
+  private async handleDockAndEmpty(vacuum: VacuumInstance): Promise<void> {
+    const canEmpty = vacuum.capabilities.includes('AutoEmptyDockManualTriggerCapability');
+    try {
+      if (vacuum.docked) {
+        this.log.info(`[${vacuum.name}] Already docked${canEmpty ? ' — triggering auto-empty' : ''}`);
+        if (canEmpty) await vacuum.client.triggerAutoEmpty();
+        return;
       }
 
-      // Then start the regular polling interval
-      vacuum.pollingInterval = setInterval(async () => {
-        try {
-          await this.updateVacuumState(vacuum);
-        } catch (error) {
-          this.log.error(`Error polling vacuum ${vacuum.name}: ${error instanceof Error ? error.message : String(error)}`);
-          vacuum.online = false;
-        }
-      }, baseInterval);
+      this.log.info(`[${vacuum.name}] Returning to dock${canEmpty ? ' (will empty once docked)' : ''}`);
+      await vacuum.client.returnHome();
+      if (canEmpty) vacuum.pendingEmptyAt = Date.now();
+    } catch (error) {
+      this.log.error(`[${vacuum.name}] Dock & Empty failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
-      this.log.info(`Started polling for ${vacuum.name} (${baseInterval}ms interval, ${totalDelay}ms initial delay)`);
-    }, totalDelay);
+  /**
+   * Set up real-time subscriptions for a specific vacuum.
+   *
+   * Replaces the previous polling model: state attributes and map data are
+   * streamed over SSE, while consumables are polled on a slow interval. Each
+   * stream emits its current value on subscription, so initial state is
+   * populated without a separate fetch. All subscriptions are added to
+   * vacuum.subscriptions so they are torn down together on shutdown.
+   */
+  private async setupSubscriptions(vacuum: VacuumInstance): Promise<void> {
+    this.log.info(`Setting up subscriptions for vacuum: ${vacuum.name}`);
+
+    const config = this.config as {
+      positionTracking?: { enabled?: boolean; intervalSeconds?: number };
+      consumables?: { warningThreshold?: number };
+    };
+
+    const batteryFlagStateMap: Record<BatteryFlag, number> = {
+      charging: 1,
+      charged: 2,
+      discharging: 3,
+      none: 3,
+    };
+
+    // State attributes (battery, status, dock status, operation mode) over SSE.
+    // concatMap serializes handling so a burst of events processes one at a time,
+    // preventing interleaved attribute writes (Valetudo can emit several in quick succession).
+    vacuum.subscriptions.add(
+      vacuum.client
+        .getStateAttributes$()
+        .pipe(
+          concatMap((attributes) =>
+            defer(async () => {
+              if (!vacuum.device) return;
+              vacuum.lastSeen = Date.now();
+
+              try {
+                // Battery
+                const battery = attributes.find((attr) => attr.__class === 'BatteryStateAttribute') as BatteryStateAttribute | undefined;
+                if (battery) {
+                  const batPercentRemaining = Math.round(battery.level * 2);
+                  const batChargeState = batteryFlagStateMap[battery.flag] ?? 0; // 0 = Unknown for an unexpected flag
+
+                  if (await vacuum.device.updateAttribute('PowerSource', 'batPercentRemaining', batPercentRemaining, this.log)) {
+                    this.log.info(`[${vacuum.name}] Battery: ${battery.level}% (${batPercentRemaining}/200)`);
+                  }
+
+                  if (await vacuum.device.updateAttribute('PowerSource', 'batChargeState', batChargeState, this.log)) {
+                    this.log.info(`[${vacuum.name}] Battery charge state: ${batChargeState}`);
+                  }
+                }
+
+                // Status and dock status from the same attributes
+                const statusAttr = attributes.find((attr) => attr.__class === 'StatusStateAttribute') as { value: string; flag?: string } | undefined;
+                const dockStatus = attributes.find((attr) => attr.__class === 'DockStatusStateAttribute') as { value: string } | undefined;
+
+                if (statusAttr) {
+                  const operationalState = this.mapValetudoStatusToOperationalState(statusAttr.value, dockStatus?.value, battery?.flag === 'charging');
+                  if (await vacuum.device.updateAttribute('RvcOperationalState', 'operationalState', operationalState, this.log)) {
+                    this.log.info(`[${vacuum.name}] Operational state: "${statusAttr.value}" → ${operationalState}`);
+                  }
+
+                  const runMode = this.mapValetudoStatusToRunMode(statusAttr.value);
+                  if (await vacuum.device.updateAttribute('RvcRunMode', 'currentMode', runMode, this.log)) {
+                    this.log.info(`[${vacuum.name}] Run mode: ${statusAttr.value} → ${runMode === RvcRunModeValue.Cleaning ? 'Cleaning' : 'Idle'}`);
+                  }
+                }
+
+                // Track whether the robot is on its dock (for the optional Dock & Empty button).
+                // Prefer the authoritative dock status attribute; fall back to the robot status.
+                vacuum.docked = dockStatus ? dockStatus.value !== 'undocked' : statusAttr?.value.toLowerCase() === 'docked';
+
+                // Fire (or expire) a button-requested empty that was deferred until docking
+                if (vacuum.pendingEmptyAt !== null) {
+                  if (Date.now() - vacuum.pendingEmptyAt > PENDING_EMPTY_TTL_MS) {
+                    this.log.info(`[${vacuum.name}] Pending auto-empty expired before docking; cancelling`);
+                    vacuum.pendingEmptyAt = null;
+                  } else if (vacuum.docked && vacuum.capabilities.includes('AutoEmptyDockManualTriggerCapability')) {
+                    vacuum.pendingEmptyAt = null;
+                    this.log.info(`[${vacuum.name}] Robot docked — triggering auto-empty`);
+                    // Fire-and-forget so a slow empty PUT can't stall the serialized state pipeline
+                    void vacuum.client.triggerAutoEmpty();
+                  }
+                }
+
+                // Keep the tracked operation mode in sync for clean-mode command handling
+                this.syncOperationModeFromAttributes(vacuum, attributes);
+              } catch (error) {
+                this.log.error(`[${vacuum.name}] Error applying state attributes: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            }),
+          ),
+        )
+        .subscribe({
+          error: (error) => {
+            this.log.error(`[${vacuum.name}] State attributes stream error: ${error instanceof Error ? error.message : String(error)}`);
+          },
+        }),
+    );
+
+    // Position tracking via periodic full-map polling (ValetudoClient.getMapData$).
+    // Polled rather than streamed over SSE because Valetudo's map SSE pushes the full
+    // map on every update — far more data than a "current room" lookup needs. The full
+    // payload is used to (re)build the cache in-place, so no extra fetch is issued.
+    // Only set up when enabled and there are mapped segments to resolve the robot's room.
+    if (config.positionTracking?.enabled !== false && vacuum.areaToSegmentMap.size > 0) {
+      const positionIntervalMs = Math.max(5, Math.min(300, config.positionTracking?.intervalSeconds ?? 30)) * 1000;
+      vacuum.subscriptions.add(
+        vacuum.client.getMapData$(positionIntervalMs).subscribe({
+          next: async (mapData) => {
+            if (!vacuum.device) return;
+            vacuum.lastSeen = Date.now();
+
+            try {
+              // (Re)build the cache from the polled map when missing/expired or the version changed
+              if (!vacuum.mapLayersCache || Date.now() > vacuum.mapCacheValidUntil || mapData.metaData?.version !== vacuum.mapLayersCache.version) {
+                await this.refreshMapCacheForVacuum(vacuum, mapData);
+              }
+
+              if (!vacuum.mapLayersCache) {
+                this.log.debug(`[${vacuum.name}] Map cache not available, skipping position tracking`);
+                return;
+              }
+
+              // Extract robot position from the map entities
+              const robotEntity = mapData.entities.find((entity) => entity.type === 'robot_position');
+              if (robotEntity && robotEntity.points.length >= 2 && vacuum.mapLayersCache) {
+                const robotPos = {
+                  x: Math.round(robotEntity.points[0] / vacuum.mapLayersCache.pixelSize),
+                  y: Math.round(robotEntity.points[1] / vacuum.mapLayersCache.pixelSize),
+                };
+
+                const currentSegment = vacuum.client.findSegmentAtPositionCached(vacuum.mapLayersCache, robotPos.x, robotPos.y);
+                if (currentSegment) {
+                  let foundAreaId: number | null = null;
+                  for (const [areaId, segmentInfo] of vacuum.areaToSegmentMap.entries()) {
+                    if (segmentInfo.id === currentSegment.metaData.segmentId) {
+                      foundAreaId = areaId;
+                      break;
+                    }
+                  }
+
+                  if (foundAreaId !== null && (await vacuum.device.updateAttribute('ServiceArea', 'currentArea', foundAreaId, this.log))) {
+                    const segmentInfo = vacuum.areaToSegmentMap.get(foundAreaId);
+                    this.log.info(`[${vacuum.name}] Location: ${segmentInfo?.name || 'Unknown'} (area ${foundAreaId})`);
+                  }
+                }
+              }
+            } catch (error) {
+              this.log.debug(`[${vacuum.name}] Position tracking error: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          },
+          error: (error) => {
+            this.log.error(`[${vacuum.name}] Position data stream error: ${error instanceof Error ? error.message : String(error)}`);
+          },
+        }),
+      );
+    }
+
+    // Consumables (slow poll) — only when consumables were set up (enabled, supported,
+    // and present), to avoid needless requests and log spam. setupConsumablesForVacuum
+    // runs during createDeviceForVacuum, before this method, so the map is already populated.
+    if (vacuum.consumableMap.size > 0) {
+      const warningThreshold = (config.consumables?.warningThreshold ?? 10) / 100;
+      vacuum.subscriptions.add(
+        vacuum.client.getConsumables$().subscribe({
+          next: async (consumables) => {
+            vacuum.lastSeen = Date.now();
+
+            try {
+              for (const consumable of consumables) {
+                const name = this.getConsumableName(consumable);
+                const entry = vacuum.consumableMap.get(name);
+                if (!entry) continue;
+
+                const remaining = consumable.remaining.value;
+                entry.consumable.remaining.value = remaining;
+                const needsReplacement = entry.properties.maxValue <= 0 || remaining / entry.properties.maxValue <= warningThreshold;
+
+                // Only act on an actual status change. The sensor's initial value is set in
+                // setupConsumablesForVacuum, so writing it unconditionally every poll just
+                // produced redundant "from X to X" log noise.
+                if (entry.lastState === undefined || entry.lastState !== needsReplacement) {
+                  const status = needsReplacement ? '⚠️ NEEDS REPLACEMENT' : '✓ OK';
+                  this.log.info(`[${vacuum.name}] ${name}: ${remaining} ${consumable.remaining.unit} - ${status}`);
+                  entry.lastState = needsReplacement;
+
+                  // Update the contact sensor if it exists
+                  if (entry.endpoint) {
+                    await entry.endpoint.updateAttribute('BooleanState', 'stateValue', !needsReplacement, this.log);
+                  }
+                }
+              }
+            } catch (error) {
+              this.log.debug(`[${vacuum.name}] Error updating consumables: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          },
+          error: (error) => {
+            this.log.error(`[${vacuum.name}] Consumables stream error: ${error instanceof Error ? error.message : String(error)}`);
+          },
+        }),
+      );
+    }
   }
 
   /**
@@ -877,7 +1150,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     });
 
     // Change mode command (handles both run mode and clean mode)
-    vacuum.device.addCommandHandler('changeToMode', async (data: { request: Record<string, unknown> }) => {
+    vacuum.device.addCommandHandler('changeToMode', async (data) => {
       this.log.info(`[${vacuum.name}] changeToMode called: ${JSON.stringify(data, (_, v) => (typeof v === 'bigint' ? Number(v) : v))}`);
 
       const request = data.request as { newMode: number };
@@ -886,6 +1159,8 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       if (isRunMode) {
         // Run mode change
         if (request.newMode === 2) {
+          // Starting a new clean supersedes any deferred Dock & Empty request
+          vacuum.pendingEmptyAt = null;
           // Start cleaning
           if (vacuum.selectedSegmentIds.length > 0) {
             this.log.info(`[${vacuum.name}] Starting room cleaning: ${vacuum.selectedRoomNames.join(', ')}`);
@@ -900,6 +1175,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
           await vacuum.client.stopCleaning();
           vacuum.selectedSegmentIds = [];
           vacuum.selectedRoomNames = [];
+        } else if (request.newMode === RvcRunModeValue.Mapping) {
+          this.log.info(`[${vacuum.name}] Starting mapping`);
+          await vacuum.client.startMapping();
         }
       } else {
         // Clean mode change — each mode specifies an operation mode + intensity preset
@@ -962,6 +1240,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     // Resume command
     vacuum.device.addCommandHandler('resume', async () => {
       this.log.info(`[${vacuum.name}] Resume called`);
+      vacuum.pendingEmptyAt = null; // resuming a clean supersedes any deferred Dock & Empty
       await vacuum.client.startCleaning();
     });
 
@@ -972,7 +1251,7 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
     });
 
     // Select areas command
-    vacuum.device.addCommandHandler('selectAreas', async (data: { request: Record<string, unknown> }) => {
+    vacuum.device.addCommandHandler('selectAreas', async (data) => {
       this.log.info(`[${vacuum.name}] selectAreas called: ${JSON.stringify(data, (_, v) => (typeof v === 'bigint' ? Number(v) : v))}`);
 
       const request = data.request as { newAreas?: number[] };
@@ -1014,7 +1293,9 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
       };
     };
 
-    if (!config.consumables?.enabled) {
+    // Default on when unspecified (matches the schema default); Matterbridge does not
+    // inject schema defaults into config, so only an explicit `false` disables tracking.
+    if (config.consumables?.enabled === false) {
       this.log.debug(`[${vacuum.name}] Consumable tracking disabled`);
       return;
     }
@@ -1077,71 +1358,6 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   }
 
   /**
-   * Set initial state for a vacuum before device registration
-   * This is critical for Apple Home to avoid "updating" status
-   */
-  private async setInitialVacuumState(vacuum: VacuumInstance): Promise<void> {
-    if (!vacuum.device) return;
-
-    try {
-      // Get initial state attributes
-      const attributes = await vacuum.client.getStateAttributes();
-      if (!attributes) {
-        this.log.warn(`[${vacuum.name}] Failed to fetch initial state attributes`);
-        return;
-      }
-
-      // Set initial battery state
-      const battery = attributes.find((attr) => attr.__class === 'BatteryStateAttribute') as BatteryStateAttribute | undefined;
-      if (battery) {
-        const batPercentRemaining = Math.round(battery.level * 2);
-        let batChargeState = 0;
-
-        if (battery.flag === 'charging') {
-          batChargeState = 1;
-        } else if (battery.flag === 'charged') {
-          batChargeState = 2;
-        } else if (battery.flag === 'discharging' || battery.flag === 'none') {
-          batChargeState = 3;
-        }
-
-        await vacuum.device.setAttribute('PowerSource', 'batPercentRemaining', batPercentRemaining, this.log);
-        await vacuum.device.setAttribute('PowerSource', 'batChargeState', batChargeState, this.log);
-        vacuum.lastBatteryLevel = batPercentRemaining;
-        vacuum.lastBatteryChargeState = batChargeState;
-
-        this.log.info(`  Initial battery: ${battery.level}% (${batPercentRemaining}/200), charge state: ${batChargeState}`);
-      }
-
-      // Set initial operational state and run mode
-      const statusAttr = attributes.find((attr) => attr.__class === 'StatusStateAttribute') as { value: string; flag?: string } | undefined;
-      const dockStatus = attributes.find((attr) => attr.__class === 'DockStatusStateAttribute') as { value: string } | undefined;
-
-      if (statusAttr) {
-        const operationalState = this.mapValetudoStatusToOperationalState(statusAttr.value, dockStatus?.value);
-        await vacuum.device.setAttribute('RvcOperationalState', 'operationalState', operationalState, this.log);
-        vacuum.lastOperationalState = operationalState;
-
-        const runMode = this.mapValetudoStatusToRunMode(statusAttr.value);
-        await vacuum.device.setAttribute('RvcRunMode', 'currentMode', runMode, this.log);
-        vacuum.lastRunMode = runMode;
-
-        this.log.info(`  Initial state: "${statusAttr.value}" (operational: ${operationalState}, run mode: ${runMode})`);
-      }
-
-      // Update current operation mode from the fetched attributes
-      this.syncOperationModeFromAttributes(vacuum, attributes);
-
-      // Migrate clean mode: if the persisted currentMode is a legacy mode, switch to
-      // the corresponding real mode. This ensures the next restart won't need the
-      // legacy compatibility entries (they'll eventually be removed in a future version).
-      await this.migrateCleanModeIfNeeded(vacuum);
-    } catch (error) {
-      this.log.error(`[${vacuum.name}] Error setting initial state: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  /**
    * Sync the current operation mode from the vacuum state attributes.
    * Can optionally use pre-fetched attributes to avoid an extra API call.
    */
@@ -1194,172 +1410,14 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   }
 
   /**
-   * Update state for a specific vacuum
-   */
-  private async updateVacuumState(vacuum: VacuumInstance): Promise<void> {
-    if (!vacuum.device) return;
-
-    try {
-      // Get state attributes (single call for battery, status, dock status, etc.)
-      const attributes = await vacuum.client.getStateAttributes();
-      if (!attributes) {
-        this.log.warn(`[${vacuum.name}] Failed to fetch state attributes`);
-        return;
-      }
-
-      // Update battery state
-      const battery = attributes.find((attr) => attr.__class === 'BatteryStateAttribute') as BatteryStateAttribute | undefined;
-      if (battery) {
-        const batPercentRemaining = Math.round(battery.level * 2);
-        let batChargeState = 0;
-
-        if (battery.flag === 'charging') {
-          batChargeState = 1;
-        } else if (battery.flag === 'charged') {
-          batChargeState = 2;
-        } else if (battery.flag === 'discharging' || battery.flag === 'none') {
-          batChargeState = 3;
-        }
-
-        // Only send updates when values actually change or on initial state
-        const batteryChanged = vacuum.lastBatteryLevel !== batPercentRemaining;
-        const chargeStateChanged = vacuum.lastBatteryChargeState !== batChargeState;
-
-        if (vacuum.initialStatePending || batteryChanged) {
-          this.log.info(`[${vacuum.name}] Battery: ${battery.level}% (${batPercentRemaining}/200)`);
-          await vacuum.device.setAttribute('PowerSource', 'batPercentRemaining', batPercentRemaining, this.log);
-          vacuum.lastBatteryLevel = batPercentRemaining;
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-
-        if (vacuum.initialStatePending || chargeStateChanged) {
-          this.log.info(`[${vacuum.name}] Battery charge state: ${batChargeState}`);
-          await vacuum.device.setAttribute('PowerSource', 'batChargeState', batChargeState, this.log);
-          vacuum.lastBatteryChargeState = batChargeState;
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-      }
-
-      // Delay before next attribute updates
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      // Extract status and dock status from the same attributes (no extra API call!)
-      const statusAttr = attributes.find((attr) => attr.__class === 'StatusStateAttribute') as { value: string; flag?: string } | undefined;
-      const dockStatus = attributes.find((attr) => attr.__class === 'DockStatusStateAttribute') as { value: string } | undefined;
-
-      if (statusAttr) {
-        const status = statusAttr;
-        // Update operational state
-        const operationalState = this.mapValetudoStatusToOperationalState(status.value, dockStatus?.value);
-        const operationalStateChanged = vacuum.lastOperationalState !== operationalState;
-
-        if (vacuum.initialStatePending || operationalStateChanged) {
-          this.log.info(`[${vacuum.name}] Operational state: "${status.value}" → ${operationalState}`);
-          await vacuum.device.setAttribute('RvcOperationalState', 'operationalState', operationalState, this.log);
-          vacuum.lastOperationalState = operationalState;
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-
-        // Update run mode
-        const runMode = this.mapValetudoStatusToRunMode(status.value);
-        const runModeChanged = vacuum.lastRunMode !== runMode;
-
-        if (vacuum.initialStatePending || runModeChanged) {
-          this.log.info(`[${vacuum.name}] Run mode: ${status.value} → ${runMode === 1 ? 'Idle' : 'Cleaning'}`);
-          await vacuum.device.setAttribute('RvcRunMode', 'currentMode', runMode, this.log);
-          vacuum.lastRunMode = runMode;
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-      }
-
-      // Update current operation mode from state attributes
-      this.syncOperationModeFromAttributes(vacuum, attributes);
-
-      // Clear initial state pending flag after first successful update
-      if (vacuum.initialStatePending) {
-        vacuum.initialStatePending = false;
-        this.log.debug(`[${vacuum.name}] Initial state set successfully`);
-      }
-
-      // Small delay before next API call to avoid overwhelming vacuum's HTTP server
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      // Position tracking with cached map layers
-      const config = this.config as { positionTracking?: { enabled?: boolean } };
-      if (config.positionTracking?.enabled !== false && vacuum.areaToSegmentMap.size > 0) {
-        try {
-          // Initialize or refresh cache if needed
-          if (!vacuum.mapLayersCache || Date.now() > vacuum.mapCacheValidUntil) {
-            await this.refreshMapCacheForVacuum(vacuum);
-          }
-
-          // Skip position tracking if cache still not available
-          if (!vacuum.mapLayersCache) {
-            this.log.debug(`[${vacuum.name}] Map cache not available, skipping position tracking`);
-          } else {
-            const positionData = await vacuum.client.getMapPositionData();
-            if (positionData) {
-              // Check map version
-              if (positionData.metaData?.version !== undefined && positionData.metaData.version !== vacuum.mapLayersCache.version) {
-                this.log.warn(`[${vacuum.name}] Map version changed, refreshing cache...`);
-                await this.refreshMapCacheForVacuum(vacuum);
-              }
-
-              // Extract robot position
-              const robotEntity = positionData.entities.find((entity) => entity.type === 'robot_position');
-              if (robotEntity && robotEntity.points.length >= 2 && vacuum.mapLayersCache) {
-                const robotPos = {
-                  x: Math.round(robotEntity.points[0] / vacuum.mapLayersCache.pixelSize),
-                  y: Math.round(robotEntity.points[1] / vacuum.mapLayersCache.pixelSize),
-                };
-
-                const currentSegment = vacuum.client.findSegmentAtPositionCached(vacuum.mapLayersCache, robotPos.x, robotPos.y);
-
-                if (currentSegment) {
-                  let foundAreaId: number | null = null;
-                  for (const [areaId, segmentInfo] of vacuum.areaToSegmentMap.entries()) {
-                    if (segmentInfo.id === currentSegment.metaData.segmentId) {
-                      foundAreaId = areaId;
-                      break;
-                    }
-                  }
-
-                  if (foundAreaId !== null && vacuum.lastCurrentArea !== foundAreaId) {
-                    const segmentInfo = vacuum.areaToSegmentMap.get(foundAreaId);
-                    this.log.info(`[${vacuum.name}] Location: ${segmentInfo?.name || 'Unknown'} (area ${foundAreaId})`);
-                    await vacuum.device.setAttribute('ServiceArea', 'currentArea', foundAreaId, this.log);
-                    vacuum.lastCurrentArea = foundAreaId;
-                  }
-                }
-              }
-            }
-          }
-        } catch (error) {
-          this.log.debug(`[${vacuum.name}] Position tracking error: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-
-      // Update consumables if enabled
-      if (vacuum.consumableMap.size > 0) {
-        await this.updateConsumableStatesForVacuum(vacuum);
-      }
-
-      vacuum.lastSeen = Date.now();
-      vacuum.online = true;
-    } catch (error) {
-      this.log.error(`[${vacuum.name}] Error updating state: ${error instanceof Error ? error.message : String(error)}`);
-      vacuum.online = false;
-    }
-  }
-
-  /**
    * Refresh map cache for a specific vacuum
    */
-  private async refreshMapCacheForVacuum(vacuum: VacuumInstance): Promise<void> {
+  private async refreshMapCacheForVacuum(vacuum: VacuumInstance, mapDataInput?: MapData): Promise<void> {
     const config = this.config as { mapCache?: { refreshIntervalHours?: number } };
     const refreshHours = Math.max(0.1, Math.min(24, config.mapCache?.refreshIntervalHours ?? 1));
 
-    const mapData = await vacuum.client.getMapDataWithTimeout(60000);
+    // Reuse the map already fetched by the position poll when available; otherwise fetch it
+    const mapData = mapDataInput ?? (await vacuum.client.getMapDataWithTimeout(60000));
     if (mapData) {
       vacuum.mapLayersCache = vacuum.client.createCachedLayers(mapData);
       vacuum.mapCacheValidUntil = Date.now() + refreshHours * 60 * 60 * 1000;
@@ -1368,64 +1426,14 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
   }
 
   /**
-   * Update consumable states for a specific vacuum
+   * Map Valetudo status to Matter RVC Operational State.
+   *
+   * @param status - Valetudo StatusStateAttribute value
+   * @param dockStatus - Valetudo DockStatusStateAttribute value (if present)
+   * @param isCharging - whether the battery flag reports charging (Valetudo has no
+   *   'charging' status; charging is a battery flag, so it is surfaced here)
    */
-  private async updateConsumableStatesForVacuum(vacuum: VacuumInstance): Promise<void> {
-    // Only check consumables every 5 minutes to reduce API load
-    const CONSUMABLES_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
-    const now = Date.now();
-
-    if (now - vacuum.lastConsumablesCheck < CONSUMABLES_CHECK_INTERVAL) {
-      return; // Skip this check
-    }
-
-    vacuum.lastConsumablesCheck = now;
-
-    const config = this.config as {
-      consumables?: {
-        warningThreshold?: number;
-      };
-    };
-
-    const warningThreshold = (config.consumables?.warningThreshold || 10) / 100;
-
-    try {
-      const consumables = await vacuum.client.getConsumables();
-      if (!consumables) return;
-      const consumableProperties = await vacuum.client.getConsumablesProperties();
-      if (!consumableProperties) return;
-
-      for (const consumable of consumables) {
-        const name = this.getConsumableName(consumable);
-        const entry = vacuum.consumableMap.get(name);
-
-        if (!entry) continue;
-
-        const remaining = consumable.remaining.value;
-        entry.consumable.remaining.value = remaining;
-        const needsReplacement = entry.properties.maxValue <= 0 || remaining / entry.properties.maxValue <= warningThreshold;
-
-        // Log status change
-        if (entry.lastState === undefined || entry.lastState !== needsReplacement) {
-          const status = needsReplacement ? '⚠️ NEEDS REPLACEMENT' : '✓ OK';
-          this.log.info(`[${vacuum.name}] ${name}: ${remaining} ${consumable.remaining.unit} - ${status}`);
-          entry.lastState = needsReplacement;
-        }
-
-        // Update contact sensor if it exists
-        if (entry.endpoint) {
-          await entry.endpoint.setAttribute('BooleanState', 'stateValue', !needsReplacement, this.log);
-        }
-      }
-    } catch (error) {
-      this.log.debug(`[${vacuum.name}] Error updating consumables: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  /**
-   * Map Valetudo status to Matter RVC Operational State
-   */
-  private mapValetudoStatusToOperationalState(status: string, dockStatus?: string): number {
+  private mapValetudoStatusToOperationalState(status: string, dockStatus?: string, isCharging?: boolean): number {
     const statusLower = status.toLowerCase();
 
     const statusMap: Record<string, RvcOperationalState.OperationalState> = {
@@ -1444,9 +1452,16 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
     if (dockStatus && (statusLower === 'docked' || statusLower === 'idle' || statusLower === 'charging')) {
       const dockStatusLower = dockStatus.toLowerCase();
+      // The dock actively servicing the robot (emptying/drying/self-cleaning) takes precedence
       if (dockStatusLower === 'emptying' || dockStatusLower === 'drying' || dockStatusLower === 'cleaning') {
         return RvcOperationalState.OperationalState.Docked;
       }
+    }
+
+    // A parked-but-charging robot shows Charging (rather than plain Docked) so controllers
+    // can distinguish "charging" from "docked & ready".
+    if (isCharging && (statusLower === 'docked' || statusLower === 'idle')) {
+      return RvcOperationalState.OperationalState.Charging;
     }
 
     return baseState;
@@ -1556,5 +1571,41 @@ export class ValetudoPlatform extends MatterbridgeDynamicPlatform {
 
     // Start periodic discovery if configured
     this.startPeriodicDiscovery();
+
+    // Start the reachability watchdog so dead/offline robots show as unreachable in the controller
+    this.startReachabilityWatchdog();
+  }
+
+  /**
+   * Periodically mark each vacuum's Matter device reachable/unreachable based on how
+   * recently it produced an update (vacuum.lastSeen). The state stream's heartbeat
+   * re-fetch keeps lastSeen fresh while the robot is online, so a robot that powers
+   * off or whose stream dies will be shown as "No Response" in Apple Home rather than
+   * displaying stale state indefinitely.
+   */
+  private startReachabilityWatchdog(): void {
+    if (this.reachabilityInterval) return;
+    this.reachabilityInterval = setInterval(() => {
+      const now = Date.now();
+      for (const vacuum of this.vacuums.values()) {
+        if (!vacuum.device) continue;
+        void this.applyReachability(vacuum, now - vacuum.lastSeen < REACHABLE_STALE_MS);
+      }
+    }, REACHABILITY_CHECK_MS);
+  }
+
+  /**
+   * Reflect a vacuum's reachability to its Matter device so controllers show it as
+   * available / "No Response" appropriately.
+   */
+  private async applyReachability(vacuum: VacuumInstance, reachable: boolean): Promise<void> {
+    if (!vacuum.device) return;
+    try {
+      if (await vacuum.device.updateAttribute('BridgedDeviceBasicInformation', 'reachable', reachable, this.log)) {
+        this.log.info(`[${vacuum.name}] Marked ${reachable ? 'reachable' : 'unreachable (no recent updates)'}`);
+      }
+    } catch (error) {
+      this.log.debug(`[${vacuum.name}] Failed to update reachability: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }

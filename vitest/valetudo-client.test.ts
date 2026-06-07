@@ -3,6 +3,36 @@ import { AnsiLogger } from 'matterbridge/logger';
 
 import { ValetudoClient, MapData, MapLayer, CachedMapLayers } from '../src/valetudo-client.ts';
 
+// Capture state for the mocked HTTP layer (hoisted so the vi.mock factory can use it)
+const httpState = vi.hoisted(() => ({ lastOptions: undefined as { method?: string; path?: string } | undefined, lastBody: undefined as string | undefined }));
+
+// Mock node:http so control-command PUTs resolve successfully and we can assert path/body.
+vi.mock('node:http', async () => {
+  const { EventEmitter } = await import('node:events');
+  return {
+    request: (options: { method?: string; path?: string }, cb: (res: unknown) => void) => {
+      httpState.lastOptions = options;
+      const res = new EventEmitter() as EventEmitter & { statusCode: number; resume: () => void };
+      res.statusCode = 200;
+      res.resume = () => {};
+      cb(res);
+      process.nextTick(() => res.emit('end'));
+      const req = new EventEmitter() as EventEmitter & { write: (b: string) => void; end: () => void; destroy: () => void };
+      req.write = (b: string) => {
+        httpState.lastBody = b;
+      };
+      req.end = () => {};
+      req.destroy = () => {};
+      return req;
+    },
+    get: () => {
+      const req = new EventEmitter() as EventEmitter & { destroy: () => void };
+      req.destroy = () => {};
+      return req;
+    },
+  };
+});
+
 const mockLog = {
   fatal: vi.fn(),
   error: vi.fn(),
@@ -342,6 +372,39 @@ describe('ValetudoClient', () => {
 
       expect(cached.layers).toHaveLength(0);
       expect(cached.version).toBe(1);
+    });
+  });
+
+  // ==========================================================================
+  // Control commands (HTTP PUT) — mock node:http to capture path/body
+  // ==========================================================================
+
+  describe('control commands', () => {
+    beforeEach(() => {
+      httpState.lastOptions = undefined;
+      httpState.lastBody = undefined;
+    });
+
+    it('triggerAutoEmpty PUTs the AutoEmptyDockManualTriggerCapability with action "trigger"', async () => {
+      const ok = await client.triggerAutoEmpty();
+      expect(ok).toBe(true);
+      expect(httpState.lastOptions?.method).toBe('PUT');
+      expect(httpState.lastOptions?.path).toBe('/api/v2/robot/capabilities/AutoEmptyDockManualTriggerCapability');
+      expect(JSON.parse(httpState.lastBody ?? '{}')).toEqual({ action: 'trigger' });
+    });
+
+    it('locate PUTs the LocateCapability with action "locate"', async () => {
+      const ok = await client.locate();
+      expect(ok).toBe(true);
+      expect(httpState.lastOptions?.path).toBe('/api/v2/robot/capabilities/LocateCapability');
+      expect(JSON.parse(httpState.lastBody ?? '{}')).toEqual({ action: 'locate' });
+    });
+
+    it('returnHome PUTs BasicControlCapability with action "home"', async () => {
+      const ok = await client.returnHome();
+      expect(ok).toBe(true);
+      expect(httpState.lastOptions?.path).toBe('/api/v2/robot/capabilities/BasicControlCapability');
+      expect(JSON.parse(httpState.lastBody ?? '{}')).toEqual({ action: 'home' });
     });
   });
 });

@@ -45,12 +45,14 @@ matterbridge -add matterbridge-valetudo
 ### From Source
 
 1. Clone the repository:
+
    ```bash
    git clone https://github.com/yJGtHb/matterbridge-valetudo.git
    cd matterbridge-valetudo
    ```
 
 2. Install dependencies and build:
+
    ```bash
    npm install
    npm run build
@@ -100,10 +102,12 @@ If auto-discovery doesn't find your vacuum, add it manually:
     "scanIntervalSeconds": 300
   },
   "vacuums": [],
-  "pollingInterval": 30000,
   "enableServerMode": false,
+  "dockAndEmptyButton": false,
+  "locateButton": false,
   "positionTracking": {
-    "enabled": true
+    "enabled": true,
+    "intervalSeconds": 30
   },
   "consumables": {
     "enabled": true,
@@ -121,21 +125,23 @@ If auto-discovery doesn't find your vacuum, add it manually:
 
 ### Configuration Parameters
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `discovery.enabled` | boolean | `true` | Enable automatic mDNS discovery |
-| `discovery.timeout` | number | `5000` | Discovery timeout in milliseconds |
-| `discovery.scanIntervalSeconds` | number | `300` | Periodic re-scan interval (0 = once at startup) |
-| `vacuums` | array | `[]` | Manually configured vacuums |
-| `vacuums[].ip` | string | required | IP address or hostname |
-| `vacuums[].name` | string | auto | Custom friendly name |
-| `vacuums[].enabled` | boolean | `true` | Enable/disable this vacuum |
-| `pollingInterval` | number | `30000` | Status polling interval (5000-60000ms) |
-| `enableServerMode` | boolean | `false` | Enable for Apple Home support |
-| `positionTracking.enabled` | boolean | `true` | Track current room during cleaning |
-| `consumables.enabled` | boolean | `true` | Enable consumable monitoring |
-| `consumables.warningThreshold` | number | `10` | Warning threshold percentage |
-| `consumables.exposeAsContactSensors` | boolean | `false` | Create contact sensors for consumables |
+| Parameter                            | Type    | Default  | Description                                                                                                      |
+| ------------------------------------ | ------- | -------- | ---------------------------------------------------------------------------------------------------------------- |
+| `discovery.enabled`                  | boolean | `true`   | Enable automatic mDNS discovery                                                                                  |
+| `discovery.timeout`                  | number  | `5000`   | Discovery timeout in milliseconds                                                                                |
+| `discovery.scanIntervalSeconds`      | number  | `300`    | Periodic re-scan interval (0 = once at startup)                                                                  |
+| `vacuums`                            | array   | `[]`     | Manually configured vacuums                                                                                      |
+| `vacuums[].ip`                       | string  | required | IP address or hostname                                                                                           |
+| `vacuums[].name`                     | string  | auto     | Custom friendly name                                                                                             |
+| `vacuums[].enabled`                  | boolean | `true`   | Enable/disable this vacuum                                                                                       |
+| `enableServerMode`                   | boolean | `false`  | Enable for Apple Home support                                                                                    |
+| `dockAndEmptyButton`                 | boolean | `false`  | Expose a switch that returns the robot to its dock and empties (if supported) — handy for Apple Home automations |
+| `locateButton`                       | boolean | `false`  | Expose a switch that plays the robot's locate sound — handy for Apple Home automations                           |
+| `positionTracking.enabled`           | boolean | `true`   | Track current room during cleaning                                                                               |
+| `positionTracking.intervalSeconds`   | number  | `30`     | How often to poll the robot's current room (5–300s)                                                              |
+| `consumables.enabled`                | boolean | `true`   | Enable consumable monitoring                                                                                     |
+| `consumables.warningThreshold`       | number  | `10`     | Warning threshold percentage                                                                                     |
+| `consumables.exposeAsContactSensors` | boolean | `false`  | Create contact sensors for consumables                                                                           |
 
 ## Apple Home Setup
 
@@ -154,13 +160,15 @@ Apple Home requires **server mode** to be enabled. This creates a separate Matte
 
 The plugin exposes the following cleaning modes based on your vacuum's capabilities:
 
-- **Vacuum Only** 
-- **Mop Only** 
+- **Vacuum Only**
+- **Mop Only**
 - **Vacuum & Mop**
 - **Vacuum then Mop**
 
 ### Presets
+
 By default the plugin maps Valetudo presets to Matter RVC modes using the following map:
+
 - `min` &rarr; Min
 - `low` &rarr; Quiet
 - `medium` &rarr; Auto
@@ -180,14 +188,14 @@ If your vacuum supports map segmentation:
 
 ### Commands
 
-| Command | Description |
-|---------|-------------|
+| Command     | Description                                  |
+| ----------- | -------------------------------------------- |
 | Start/Clean | Begin cleaning (selected rooms or full home) |
-| Stop | Stop cleaning and stay in place |
-| Pause | Pause cleaning |
-| Resume | Resume paused cleaning |
-| Return Home | Return to charging dock |
-| Locate | Play a sound to find the vacuum |
+| Stop        | Stop cleaning and stay in place              |
+| Pause       | Pause cleaning                               |
+| Resume      | Resume paused cleaning                       |
+| Return Home | Return to charging dock                      |
+| Locate      | Play a sound to find the vacuum              |
 
 ## Consumable Sensors
 
